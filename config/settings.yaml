@@ -1,0 +1,91 @@
+# ============================================================
+# GRID BOT CONFIGURATION
+# Change behavior here, not in Python code.
+# ============================================================
+
+# --- Trading pairs ---
+# We ONLY trade these two. No others.
+trading:
+  pairs:
+    - symbol: BTCUSDT
+      base: BTC
+      quote: USDT
+    - symbol: ETHUSDT
+      base: ETH
+      quote: USDT
+
+# --- Grid parameters ---
+# These control the grid's shape and behavior
+grid:
+  # Number of grid levels above AND below current price
+  # Total orders = levels_above + levels_below
+  levels_above: 5
+  levels_below: 5
+
+  # Base spacing as percentage of current price
+  # 0.3% of $60,000 = $180 spacing
+  # This is the DEFAULT — signals will adjust it dynamically
+  base_spacing_pct: 0.3
+
+  # Min/max spacing bounds (safety rails)
+  min_spacing_pct: 0.15    # Never tighter than this (fees would eat profit)
+  max_spacing_pct: 1.0     # Never wider than this (too few cycles)
+
+  # Order size per grid level (in base asset)
+  order_size:
+    BTCUSDT: 0.001          # 0.001 BTC per level (~$60 at $60k)
+    ETHUSDT: 0.01            # 0.01 ETH per level (~$30 at $3k)
+
+  # Re-centering: when price moves this far from grid center,
+  # cancel and rebuild the grid around new price
+  recenter_threshold_pct: 2.0
+
+# --- Risk management ---
+risk:
+  # Maximum percentage of portfolio in open positions
+  max_exposure_pct: 30.0
+
+  # Per-trade stop loss (percentage from entry)
+  stop_loss_pct: 1.5
+
+  # Portfolio drawdown tiers
+  drawdown:
+    soft_limit_pct: 3.0     # Reduce order sizes by 50%
+    hard_limit_pct: 5.0     # Pause grid, no new orders
+    kill_pct: 8.0            # Cancel ALL orders, flatten position
+
+  # Maximum number of open orders across all pairs
+  max_open_orders: 20
+
+  # Daily loss limit (USD) — kill-switch triggers if breached
+  daily_loss_limit_usd: 500.0
+
+# --- Signal weights ---
+# How much each signal influences grid decisions
+# Must sum to 1.0
+signals:
+  supply_demand_weight: 0.50   # Strongest — defines grid bounds
+  liquidity_weight: 0.30       # Second — adjusts spacing
+  sentiment_weight: 0.20       # Third — safety override
+
+  # Sentiment score below this pauses the grid entirely
+  sentiment_pause_threshold: -0.7
+
+# --- Exchange settings ---
+exchange:
+  name: binance
+  use_testnet: true            # START WITH TESTNET. Always.
+
+  # Rate limiting (Binance allows 1200 req/min)
+  max_requests_per_minute: 1000  # Stay under the limit
+  order_timeout_seconds: 5       # Cancel if not acknowledged in 5s
+
+  # Reconnection policy for WebSocket
+  ws_reconnect_delay_seconds: 1
+  ws_max_reconnect_attempts: 10
+
+# --- Logging ---
+logging:
+  level: INFO                   # DEBUG in dev, INFO in prod
+  format: json                  # Structured logs for production
+  file: logs/grid_bot.log

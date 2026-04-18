@@ -1,0 +1,21 @@
+# Exchange connectivity
+python-binance==1.0.19       # Binance REST + WebSocket client
+websockets==12.0              # Raw WebSocket support for custom feeds
+
+# Async framework — our bot is event-driven, not sequential
+aiohttp==3.9.5                # Async HTTP client for API calls
+
+# Configuration
+pyyaml==6.0.1                 # Parse YAML config files
+python-dotenv==1.0.1          # Load .env files for secrets
+
+# Data handling
+numpy==1.26.4                 # Numerical computation (order book math)
+pandas==2.2.2                 # Data manipulation (signal analysis)
+
+# Logging and monitoring
+structlog==24.2.0             # Structured logging (JSON logs for production)
+
+# Testing
+pytest==8.2.2                 # Test framework
+pytest-asyncio==0.23.7        # Async test support
