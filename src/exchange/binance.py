@@ -28,6 +28,7 @@ from src.exchange.base import (
     OrderStatus,
     OrderType,
 )
+from src.exchange.filters import SymbolFilter, round_to_step, round_to_tick
 from src.utils.logger import get_logger
 
 logger = get_logger("binance_exchange")
@@ -70,6 +71,11 @@ class BinanceExchange(ExchangeBase):
         self._request_count = 0
         self._request_window_start = time.time()
         self._max_requests_per_minute = 1000  # Stay under 1200 limit
+
+        # Cached symbol filters: tick_size/step_size rarely change but we
+        # must not fetch them per-order (adds latency + rate-limit load).
+        # Fetched lazily on first use.
+        self._filter_cache: dict[str, SymbolFilter] = {}
 
     async def connect(self) -> None:
         """
@@ -292,3 +298,92 @@ class BinanceExchange(ExchangeBase):
         price = float(ticker["price"])
         logger.debug("ticker price", symbol=symbol, price=price)
         return price
+
+    # ------------------------------------------------------------------
+    # Phase 5 additions: filters, bulk cancel, rounding helpers.
+    # ------------------------------------------------------------------
+
+    async def cancel_all_orders(self, symbol: str) -> int:
+        """
+        Cancel every open order for `symbol`. Returns the count cancelled.
+
+        WHY a dedicated endpoint instead of looping cancel_order?
+        Binance exposes DELETE /openOrders which cancels the whole book in
+        one call. That's atomic from our perspective — no race where a
+        new order places between individual cancels. Critical for the
+        shutdown path: when we SIGINT the bot we want to guarantee nothing
+        is left hanging.
+        """
+        await self._check_rate_limit()
+        # python-binance 1.0.19 does NOT expose a public wrapper for
+        # DELETE /api/v3/openOrders. We hit the signed endpoint directly via
+        # the library's internal _delete helper — same atomic single-call
+        # semantics, no race window between individual cancels.
+        try:
+            raw = self._client._delete("openOrders", True, data={"symbol": symbol})
+            count = len(raw) if isinstance(raw, list) else 0
+            logger.info("bulk cancel", symbol=symbol, count=count)
+            return count
+        except BinanceAPIException as e:
+            # -2011 "Unknown order" is returned when there's nothing to cancel.
+            # That's success, not failure — the postcondition (no open orders)
+            # holds either way.
+            if e.code == -2011:
+                logger.info("bulk cancel: nothing to cancel", symbol=symbol)
+                return 0
+            logger.error("bulk cancel failed", symbol=symbol, error=str(e))
+            raise
+
+    async def get_symbol_filters(self, symbol: str, refresh: bool = False) -> SymbolFilter:
+        """
+        Return the tick/step/min-notional filters for `symbol`.
+
+        Cached by default — filters change rarely (listing changes only).
+        Pass refresh=True to force a fresh fetch.
+        """
+        if not refresh and symbol in self._filter_cache:
+            return self._filter_cache[symbol]
+
+        await self._check_rate_limit()
+        info = self._client.get_symbol_info(symbol)
+        if not info:
+            raise ValueError(f"no exchange info for symbol {symbol}")
+
+        tick_size = step_size = min_qty = min_notional = 0.0
+        for f in info.get("filters", []):
+            ft = f.get("filterType")
+            if ft == "PRICE_FILTER":
+                tick_size = float(f["tickSize"])
+            elif ft == "LOT_SIZE":
+                step_size = float(f["stepSize"])
+                min_qty = float(f["minQty"])
+            elif ft in ("NOTIONAL", "MIN_NOTIONAL"):
+                # Binance renamed this filter mid-2023. Either key is valid.
+                key = "minNotional" if "minNotional" in f else "notional"
+                min_notional = float(f[key])
+
+        sf = SymbolFilter(
+            symbol=symbol,
+            tick_size=tick_size,
+            step_size=step_size,
+            min_qty=min_qty,
+            min_notional=min_notional,
+        )
+        self._filter_cache[symbol] = sf
+        logger.info("symbol filters fetched",
+                    symbol=symbol,
+                    tick_size=tick_size,
+                    step_size=step_size,
+                    min_qty=min_qty,
+                    min_notional=min_notional)
+        return sf
+
+    async def round_price(self, symbol: str, price: float) -> float:
+        """Convenience: fetch filter and round price to tick."""
+        sf = await self.get_symbol_filters(symbol)
+        return round_to_tick(price, sf.tick_size)
+
+    async def round_quantity(self, symbol: str, qty: float) -> float:
+        """Convenience: fetch filter and round quantity to step."""
+        sf = await self.get_symbol_filters(symbol)
+        return round_to_step(qty, sf.step_size)

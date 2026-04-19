@@ -178,3 +178,23 @@ class ExchangeBase(ABC):
     async def get_ticker_price(self, symbol: str) -> float:
         """Get current price for a symbol."""
         ...
+
+    # ------------------------------------------------------------------
+    # Phase 5 additions. Every concrete adapter (and every test fake) must
+    # implement these — they are how the grid engine learns the exchange's
+    # rules and how it shuts down cleanly.
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def cancel_all_orders(self, symbol: str) -> int:
+        """Cancel every open order for `symbol`. Returns count cancelled."""
+        ...
+
+    @abstractmethod
+    async def get_symbol_filters(self, symbol: str):
+        """
+        Return a SymbolFilter with tick/step/min_notional for the symbol.
+        Return type is 'SymbolFilter' (from src.exchange.filters) — not
+        annotated here to avoid circular import at interface level.
+        """
+        ...

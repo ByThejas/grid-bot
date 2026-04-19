@@ -1,6 +1,7 @@
 # Exchange connectivity
 python-binance==1.0.19       # Binance REST + WebSocket client
 websockets==12.0              # Raw WebSocket support for custom feeds
+cryptography==42.0.8          # Ed25519 signing for Binance WS API session.logon
 
 # Async framework — our bot is event-driven, not sequential
 aiohttp==3.9.5                # Async HTTP client for API calls
