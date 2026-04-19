@@ -207,3 +207,107 @@ class MarketDataStore:
         row = await cursor.fetchone()
         await cursor.close()
         return row[0] if row else 0
+
+    # ------------------------------------------------------------------
+    # Read APIs — used by signal modules (Phase 4+)
+    # ------------------------------------------------------------------
+    # Why expose reads as dedicated methods rather than letting callers
+    # write SQL? Keeps the storage abstraction intact: when we swap SQLite
+    # for DynamoDB later, only this file changes. Signal modules consume
+    # plain Python objects and never touch SQL.
+
+    async def get_trades(
+        self,
+        symbol: str,
+        since_ts_ms: int,
+    ) -> list[dict]:
+        """
+        Return trades for `symbol` with timestamp >= since_ts_ms.
+
+        Each row is a plain dict (not a dataclass) because signal code
+        does numpy vectorization and dict access is friendlier there.
+        Sorted ascending by timestamp.
+        """
+        cursor = await self._db.execute(
+            """
+            SELECT trade_id, price, quantity, is_buyer_maker, timestamp
+            FROM trades
+            WHERE symbol = ? AND timestamp >= ?
+            ORDER BY timestamp ASC
+            """,
+            (symbol, since_ts_ms),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [
+            {
+                "trade_id": r[0],
+                "price": r[1],
+                "quantity": r[2],
+                "is_buyer_maker": bool(r[3]),
+                "timestamp": r[4],
+            }
+            for r in rows
+        ]
+
+    async def get_snapshots(
+        self,
+        symbol: str,
+        since_ts_ms: int,
+    ) -> list[dict]:
+        """
+        Return order book snapshots for `symbol` with timestamp >= since_ts_ms.
+
+        Each row contains the parsed bids/asks as Python lists rather than
+        JSON strings — callers should not have to know the serialization.
+        Sorted ascending by timestamp.
+        """
+        cursor = await self._db.execute(
+            """
+            SELECT timestamp, best_bid, best_ask, mid_price, spread, bids_json, asks_json
+            FROM orderbook_snapshots
+            WHERE symbol = ? AND timestamp >= ?
+            ORDER BY timestamp ASC
+            """,
+            (symbol, since_ts_ms),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [
+            {
+                "timestamp": r[0],
+                "best_bid": r[1],
+                "best_ask": r[2],
+                "mid_price": r[3],
+                "spread": r[4],
+                "bids": json.loads(r[5]),
+                "asks": json.loads(r[6]),
+            }
+            for r in rows
+        ]
+
+    async def get_latest_snapshot(self, symbol: str) -> Optional[dict]:
+        """Return the most recent snapshot for `symbol`, or None if empty."""
+        cursor = await self._db.execute(
+            """
+            SELECT timestamp, best_bid, best_ask, mid_price, spread, bids_json, asks_json
+            FROM orderbook_snapshots
+            WHERE symbol = ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """,
+            (symbol,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if not row:
+            return None
+        return {
+            "timestamp": row[0],
+            "best_bid": row[1],
+            "best_ask": row[2],
+            "mid_price": row[3],
+            "spread": row[4],
+            "bids": json.loads(row[5]),
+            "asks": json.loads(row[6]),
+        }

@@ -30,6 +30,7 @@ Binance trade event schema (per @trade stream docs):
 """
 
 import asyncio
+import time
 from typing import Optional
 
 from binance import AsyncClient, BinanceSocketManager
@@ -66,9 +67,15 @@ class TradeStream:
         self._trades_written = 0
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        """Main loop. Same shape as OrderBookStream.run for consistency."""
+        """
+        Main loop. Same shape as OrderBookStream.run for consistency,
+        including the consecutive-failures reconnect semantics that
+        keep long overnight runs alive through transient disconnects.
+        """
+        HEALTHY_SESSION_SECS = 30.0
         attempts = 0
         while not stop_event.is_set():
+            session_start = time.time()
             try:
                 await self._consume_until_disconnect(stop_event)
                 break
@@ -76,6 +83,9 @@ class TradeStream:
                 logger.info("trade stream cancelled", symbol=self._symbol)
                 raise
             except Exception as e:
+                session_duration = time.time() - session_start
+                if session_duration >= HEALTHY_SESSION_SECS:
+                    attempts = 0
                 attempts += 1
                 if attempts > self._max_reconnect_attempts:
                     logger.error(
@@ -89,6 +99,7 @@ class TradeStream:
                     "trade stream disconnected, will retry",
                     symbol=self._symbol,
                     attempt=attempts,
+                    session_duration_s=round(session_duration, 1),
                     delay_s=self._reconnect_delay_s,
                     error=str(e),
                 )

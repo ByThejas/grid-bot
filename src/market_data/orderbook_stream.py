@@ -80,9 +80,18 @@ class OrderBookStream:
         """
         Main loop. Holds the WebSocket open, persists snapshots,
         reconnects on failure, exits cleanly when stop_event is set.
+
+        Reconnect counter semantics:
+        - `attempts` counts CONSECUTIVE failures, not lifetime failures.
+        - If a session ran for >= HEALTHY_SESSION_SECS before failing,
+          we treat it as a healthy session and reset the counter.
+        - This matters for overnight runs: 10 transient disconnects
+          spread across 8 hours shouldn't kill the stream on the 11th.
         """
+        HEALTHY_SESSION_SECS = 30.0
         attempts = 0
         while not stop_event.is_set():
+            session_start = time.time()
             try:
                 await self._consume_until_disconnect(stop_event)
                 # Clean exit (stop_event set during consume) → break out.
@@ -92,6 +101,11 @@ class OrderBookStream:
                 logger.info("orderbook stream cancelled", symbol=self._symbol)
                 raise
             except Exception as e:
+                session_duration = time.time() - session_start
+                if session_duration >= HEALTHY_SESSION_SECS:
+                    # The stream was healthy before this failure; forgive
+                    # prior attempts so the reconnect budget is fresh.
+                    attempts = 0
                 attempts += 1
                 if attempts > self._max_reconnect_attempts:
                     logger.error(
@@ -105,6 +119,7 @@ class OrderBookStream:
                     "orderbook stream disconnected, will retry",
                     symbol=self._symbol,
                     attempt=attempts,
+                    session_duration_s=round(session_duration, 1),
                     delay_s=self._reconnect_delay_s,
                     error=str(e),
                 )

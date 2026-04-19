@@ -71,6 +71,33 @@ signals:
   # Sentiment score below this pauses the grid entirely
   sentiment_pause_threshold: -0.7
 
+  # Supply & Demand detector config (Phase 4)
+  supply_demand:
+    # --- Footprint imbalance (trade-flow based) ---
+    footprint:
+      window_minutes: 15          # Analyse the last 15 min of trades
+      # $ width of each price bucket — calibrated for BTC ~$75k, ETH ~$2.3k
+      bucket_size:
+        BTCUSDT: 50.0             # 50 USDT buckets ≈ 6-7 bps of BTC
+        ETHUSDT: 1.0              # 1 USDT buckets ≈ 4 bps of ETH
+      # Minimum total volume (base asset) in a bucket to consider it
+      min_volume:
+        BTCUSDT: 0.5              # ≥ 0.5 BTC traded in the bucket
+        ETHUSDT: 5.0              # ≥ 5 ETH traded in the bucket
+      # |imbalance| threshold — 0.6 means one side is ≥80% of volume
+      imbalance_threshold: 0.6
+
+    # --- Absorption walls (order-book persistence based) ---
+    absorption:
+      window_minutes: 5           # Look over last 5 min of snapshots
+      min_persistence_ratio: 0.7  # Level must appear in ≥70% of snapshots
+      max_size_decay_pct: 0.30    # Size may shrink ≤30% across window
+      size_zscore_threshold: 2.0  # Level must be ≥2σ above mean depth
+      # ± $ padding around the exact wall price to form the zone band
+      zone_pad:
+        BTCUSDT: 5.0
+        ETHUSDT: 0.5
+
 # --- Exchange settings ---
 exchange:
   name: binance
