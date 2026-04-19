@@ -54,6 +54,7 @@ from src.exchange.filters import SymbolFilter, meets_min_notional, round_to_step
 from src.grid.config import GridEngineConfig
 from src.grid.levels import GridParams, compute_grid
 from src.grid.state import GridState
+from src.risk.manager import RiskManager
 from src.signals.base import Signal
 from src.utils.logger import get_logger
 
@@ -80,16 +81,22 @@ class GridEngine:
         exchange: ExchangeBase,
         config: GridEngineConfig,
         signal: Optional[Signal] = None,
+        risk: Optional[RiskManager] = None,
     ):
         self._exchange = exchange
         self._config = config
         self._signal = signal
+        # RiskManager is shared across engines (one instance per process).
+        # Optional so existing tests + dry-run rehearsals without a risk
+        # config keep working — production runner always passes one.
+        self._risk = risk
         self._state = GridState()
         self._filters: Optional[SymbolFilter] = None
         # Counters for observability at shutdown.
         self._placed = 0
         self._filled = 0
         self._recentered = 0
+        self._blocked_by_risk = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -136,6 +143,8 @@ class GridEngine:
         elif status == "CANCELED":
             # Someone (us or exchange) cancelled. Drop from state, no replace.
             removed = self._state.remove_order(order_id)
+            if self._risk is not None:
+                self._risk.record_closed(order_id)
             if removed:
                 logger.info("order cancelled (event)",
                             order_id=order_id, side=removed.side, price=removed.price)
@@ -213,6 +222,17 @@ class GridEngine:
                            min_notional=self._filters.min_notional)
             return None
 
+        # Risk gate runs AFTER filter checks so we don't burn the
+        # max-open-orders budget on levels that would fail at the exchange
+        # anyway. Order matters: filters → risk → place.
+        if self._risk is not None:
+            blocked = self._risk.check_can_place(self._config.symbol, side, price, size)
+            if blocked:
+                self._blocked_by_risk += 1
+                logger.warning("level blocked by risk",
+                               side=side, price=price, size=size, reason=blocked)
+                return None
+
         try:
             order = await self._exchange.place_order(
                 symbol=self._config.symbol,
@@ -222,6 +242,8 @@ class GridEngine:
                 price=price,
             )
             self._state.add_order(order.order_id, side, price, size)
+            if self._risk is not None:
+                self._risk.record_open(order.order_id)
             logger.debug("level placed",
                          order_id=order.order_id,
                          side=side, price=price, size=size, reason=reason)
@@ -244,6 +266,14 @@ class GridEngine:
             return
 
         self._filled += 1
+        if self._risk is not None:
+            # Use Binance's executed price (`L`) and qty (`l`) when present
+            # — these are the actual trade prints. Fall back to our tracked
+            # values if the event is missing them (shouldn't happen).
+            fill_price = float(event.get("L", original.price) or original.price)
+            fill_qty = float(event.get("l", original.size) or original.size)
+            self._risk.record_closed(order_id)
+            self._risk.record_fill(self._config.symbol, original.side, fill_price, fill_qty)
         logger.info("fill",
                     order_id=order_id,
                     side=original.side,
@@ -301,8 +331,15 @@ class GridEngine:
                     logger.error("recenter failed", error=str(e))
 
     async def _recenter(self, new_center: float) -> None:
+        # Snapshot ids BEFORE clearing — we need to release them from the
+        # risk ledger immediately so the new grid doesn't hit the open-
+        # orders cap waiting for CANCELED events to drift in over the WS.
+        ids_to_release = list(self._state.orders.keys())
         await self._exchange.cancel_all_orders(self._config.symbol)
         self._state.clear()
+        if self._risk is not None:
+            for oid in ids_to_release:
+                self._risk.record_closed(oid)
         self._state.center_price = new_center
         zones = await self._compute_zones_safely()
         await self._place_grid(new_center, zones)
@@ -319,14 +356,20 @@ class GridEngine:
         on shutdown. Even if cancel_all fails we log and re-raise so the
         operator sees a loud error.
         """
+        ids_to_release = list(self._state.orders.keys())
         try:
             n = await self._exchange.cancel_all_orders(self._config.symbol)
+            self._state.clear()
+            if self._risk is not None:
+                for oid in ids_to_release:
+                    self._risk.record_closed(oid)
             logger.info("engine shutdown",
                         symbol=self._config.symbol,
                         cancelled=n,
                         placed_total=self._placed,
                         filled_total=self._filled,
-                        recentered_total=self._recentered)
+                        recentered_total=self._recentered,
+                        blocked_by_risk=self._blocked_by_risk)
         except Exception:
             logger.exception("SHUTDOWN cancel_all FAILED — check exchange for dangling orders",
                              symbol=self._config.symbol)

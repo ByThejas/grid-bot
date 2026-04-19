@@ -6,11 +6,19 @@ USAGE (venv activated, from repo root):
 
 WHAT IT DOES
 - Reads trading.pairs from settings.yaml
-- For each symbol: builds a GridEngine (exchange + config + optional S&D signal)
+- For each symbol: builds a GridEngine (exchange + config + optional S&D
+  signal + shared RiskManager)
 - Opens ONE authenticated UserDataStream (account-wide) and dispatches
   each executionReport event to every engine whose symbol it matches
-- On SIGINT / SIGTERM: flips stop_event, every engine runs cancel_all
-  on the way out, clients close
+- Runs a risk monitor task that polls the kill-switch sentinel file and
+  flips stop_event if the RiskManager halts for any reason
+- On SIGINT / SIGTERM / risk halt: flips stop_event, every engine runs
+  cancel_all on the way out, clients close
+
+EXTERNAL HALT
+The risk layer watches `runtime/HALT` (configurable). To stop the bot
+from outside the process: `touch runtime/HALT`. Engines unwind cleanly,
+all open orders cancel, then the runner exits.
 
 SAFETY
 - `use_testnet: true` in settings.yaml is the only place the production/
@@ -43,6 +51,8 @@ from src.exchange.user_data_stream import UserDataStream
 from src.grid.config import GridEngineConfig
 from src.grid.engine import GridEngine
 from src.market_data.storage import MarketDataStore
+from src.risk.config import RiskConfig
+from src.risk.manager import RiskManager
 from src.signals.supply_demand import SupplyDemandConfig, SupplyDemandSignal
 from src.utils.logger import get_logger
 
@@ -103,11 +113,19 @@ async def _run(dry_run: bool = False) -> None:
         logger.info("no market data DB found — grid will be unbiased",
                     expected_db=DB_PATH)
 
+    # --- Shared risk manager (one per process, all engines consult it) ---
+    risk_cfg = RiskConfig.from_yaml(settings)
+    risk = RiskManager(risk_cfg)
+    logger.info("risk manager wired",
+                max_open_orders=risk_cfg.max_open_orders,
+                daily_loss_limit_usd=risk_cfg.daily_loss_limit_usd,
+                kill_switch_path=risk_cfg.kill_switch_path)
+
     # --- One engine per symbol ---
     engines: dict[str, GridEngine] = {}
     for symbol in symbols:
         cfg = GridEngineConfig.from_yaml(symbol, settings)
-        engines[symbol] = GridEngine(exchange=exchange, config=cfg, signal=signal)
+        engines[symbol] = GridEngine(exchange=exchange, config=cfg, signal=signal, risk=risk)
 
     # --- User data stream dispatcher: fan events out to all engines ---
     # Each engine filters for its own symbol, so a duplicate dispatch is
@@ -139,8 +157,26 @@ async def _run(dry_run: bool = False) -> None:
         except (ValueError, OSError):
             pass
 
+    # --- Risk monitor: polls kill switch + watches halt state ---
+    # Shared with all engines via the RiskManager instance. When the file
+    # appears or the manager trips for any other reason, we flip stop_event
+    # so engines run their normal cancel-all shutdown path.
+    async def _risk_monitor() -> None:
+        while not stop_event.is_set():
+            try:
+                await asyncio.sleep(risk_cfg.poll_interval_s)
+            except asyncio.CancelledError:
+                return
+            risk.poll_kill_switch()
+            if risk.halted:
+                logger.error("risk halt — initiating shutdown",
+                             reason=risk.halt_reason)
+                stop_event.set()
+                return
+
     # --- Run stream + engines concurrently ---
-    tasks = [asyncio.create_task(user_stream.run(stop_event), name="user_data_stream")]
+    tasks = [asyncio.create_task(user_stream.run(stop_event), name="user_data_stream"),
+             asyncio.create_task(_risk_monitor(), name="risk_monitor")]
     for symbol, engine in engines.items():
         tasks.append(asyncio.create_task(engine.run(stop_event), name=f"engine:{symbol}"))
 
