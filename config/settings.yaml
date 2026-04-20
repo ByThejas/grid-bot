@@ -60,6 +60,22 @@ risk:
   # Daily loss limit (USD) — kill-switch triggers if breached
   daily_loss_limit_usd: 500.0
 
+# --- Mainnet risk overrides (Phase 10) ---
+# When env_mode == mainnet, THESE values shadow the corresponding keys in
+# the `risk:` block above. Testnet ignores this block entirely. The idea:
+# keep testnet permissive enough to exercise every code path, then dial
+# real money down until a canary proves stability.
+risk_overrides:
+  mainnet:
+    # Half of testnet — keep the open-order footprint small while we prove
+    # the mainnet path. 2 symbols × ~5 levels/side would hit 20; we cap
+    # to 10 so a runaway loop is bounded to roughly "one grid worth".
+    max_open_orders: 10
+    # Real money floor, in USD. $50 is the canary ceiling: if the rolling
+    # 24h realized PnL dips below -$50 the kill switch trips and we stop.
+    # Tighten further (to e.g. $20) for the first live canary day.
+    daily_loss_limit_usd: 50.0
+
 # --- Signal weights ---
 # How much each signal influences grid decisions
 # Must sum to 1.0
