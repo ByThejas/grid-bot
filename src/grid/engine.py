@@ -144,6 +144,41 @@ class GridEngine:
                 pass
             await self._shutdown()
 
+    async def check_drift_now(self) -> bool:
+        """
+        One-shot drift check — returns True if a recenter was triggered.
+
+        EXISTS FOR: the backtest runner. In production, `_drift_monitor`
+        polls on a wall-clock schedule, which is the wrong model for a
+        replay where we want to drive state transitions from a simulated
+        timeline, not from asyncio.sleep. Backtest runner calls this
+        directly after each tick (or batch) so recenters fire against the
+        simulated price path, not against wall time.
+
+        Safe to call from anywhere — uses only public exchange reads plus
+        the same `_recenter` that the drift_monitor uses.
+        """
+        if self._state.center_price <= 0:
+            return False
+        try:
+            current = await self._exchange.get_ticker_price(self._config.symbol)
+        except Exception as e:
+            logger.warning("check_drift_now ticker failed", error=str(e))
+            return False
+        drift_pct = abs(current - self._state.center_price) / self._state.center_price * 100.0
+        if drift_pct < self._config.recenter_threshold_pct:
+            return False
+        logger.info("drift threshold hit (manual) — recentering",
+                    old_center=self._state.center_price,
+                    new_center=current,
+                    drift_pct=round(drift_pct, 3))
+        try:
+            await self._recenter(current)
+            return True
+        except Exception as e:
+            logger.error("recenter failed (manual)", error=str(e))
+            return False
+
     async def on_fill(self, event: dict) -> None:
         """
         Consume one user-data event. Safe to call with any payload — the
