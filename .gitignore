@@ -25,3 +25,9 @@ Thumbs.db
 logs/
 *.log
 data/
+
+# Runtime sentinels and state (HALT, SENTIMENT, STATUS.json) — live state, not source
+runtime/
+
+# Claude / assistant working directory
+.claude/

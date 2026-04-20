@@ -63,6 +63,7 @@ from src.exchange.user_data_stream import UserDataStream
 from src.grid.config import GridEngineConfig
 from src.grid.engine import GridEngine
 from src.market_data.storage import MarketDataStore
+from src.observability.heartbeat import HeartbeatMonitor, ObservabilityConfig
 from src.risk.config import RiskConfig
 from src.risk.manager import RiskManager
 from src.signals.liquidity import LiquidityConfig, LiquiditySignal
@@ -230,9 +231,21 @@ async def _run(dry_run: bool = False,
                 stop_event.set()
                 return
 
+    # --- Heartbeat monitor (Phase 10B) ---
+    # Emits a STATUS.json snapshot + log line every interval_s, plus a
+    # DAILY SUMMARY line on UTC day rollover. Read-only on engines + risk.
+    obs_cfg = ObservabilityConfig.from_yaml(settings)
+    heartbeat = HeartbeatMonitor(
+        engines=engines, risk=risk, env_mode=env_mode, config=obs_cfg,
+    )
+    logger.info("heartbeat wired",
+                interval_s=obs_cfg.heartbeat_interval_s,
+                status_path=obs_cfg.status_path)
+
     # --- Run stream + engines concurrently ---
     tasks = [asyncio.create_task(user_stream.run(stop_event), name="user_data_stream"),
-             asyncio.create_task(_risk_monitor(), name="risk_monitor")]
+             asyncio.create_task(_risk_monitor(), name="risk_monitor"),
+             asyncio.create_task(heartbeat.run(stop_event), name="heartbeat")]
     for symbol, engine in engines.items():
         tasks.append(asyncio.create_task(engine.run(stop_event), name=f"engine:{symbol}"))
 

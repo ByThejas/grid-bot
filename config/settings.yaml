@@ -152,6 +152,22 @@ exchange:
   ws_reconnect_delay_seconds: 1
   ws_max_reconnect_attempts: 10
 
+# --- Observability (Phase 10B) ---
+# Periodic health signal + structured snapshot for external watchers. See
+# src/observability/heartbeat.py for semantics.
+observability:
+  # How often to emit a heartbeat log line and rewrite STATUS.json.
+  # 300s = every 5 minutes. Drop to 60s for canary runs where you want
+  # faster feedback; keep at 300s in steady state so logs stay readable.
+  heartbeat_interval_s: 300
+  # Atomic snapshot file — same runtime/ directory as HALT + SENTIMENT.
+  # External dashboards / cron watchers read this without attaching to
+  # the Python process.
+  status_path: runtime/STATUS.json
+  # Log a DAILY SUMMARY line on UTC day rollover (diff of counters over
+  # the day just ended). Set to false only for noisy debugging.
+  enable_daily_summary: true
+
 # --- Logging ---
 logging:
   level: INFO                   # DEBUG in dev, INFO in prod
