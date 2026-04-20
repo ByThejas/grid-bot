@@ -71,6 +71,18 @@ signals:
   # Sentiment score below this pauses the grid entirely
   sentiment_pause_threshold: -0.7
 
+  # Sentiment signal config (Phase 8) — pauses initial + recenter
+  # placement on strongly-negative news/social sentiment. Replacement
+  # orders are NOT gated (existing inventory needs an exit).
+  # v1 source is a JSON file the operator updates via
+  # `python -m scripts.set_sentiment -- -0.85 "reason"`.
+  sentiment:
+    # Path to the JSON sentinel. Same convention as runtime/HALT.
+    sentiment_path: runtime/SENTIMENT
+    # Treat readings older than this as stale → revert to neutral.
+    # 1800s = 30 min; old news is no news. Set to 0 to disable.
+    max_age_seconds: 1800.0
+
   # Liquidity signal config (Phase 7) — adapts grid spacing to spread,
   # pauses placement when the market looks broken (wide spread).
   liquidity:

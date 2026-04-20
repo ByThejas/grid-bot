@@ -57,6 +57,7 @@ from src.grid.state import GridState
 from src.risk.manager import RiskManager
 from src.signals.base import Signal
 from src.signals.liquidity import LiquiditySignal
+from src.signals.sentiment import SentimentSignal
 from src.utils.logger import get_logger
 
 logger = get_logger("grid_engine")
@@ -84,6 +85,7 @@ class GridEngine:
         signal: Optional[Signal] = None,
         risk: Optional[RiskManager] = None,
         liquidity: Optional[LiquiditySignal] = None,
+        sentiment: Optional[SentimentSignal] = None,
     ):
         self._exchange = exchange
         self._config = config
@@ -95,6 +97,13 @@ class GridEngine:
         # LiquiditySignal is also shared across engines. Same optionality
         # rule — absent means use static base_spacing_pct from config.
         self._liquidity = liquidity
+        # SentimentSignal — third pillar. Pauses initial + recenter
+        # placement when news/social sentiment turns sharply negative.
+        # Replacements are intentionally NOT gated by sentiment so that
+        # already-acquired inventory keeps its exit order on the book.
+        # Operator can use the kill switch (RiskManager halt) to stop
+        # everything including replacements.
+        self._sentiment = sentiment
         self._state = GridState()
         self._filters: Optional[SymbolFilter] = None
         # The spacing the active grid was placed with. Updated each time
@@ -108,6 +117,7 @@ class GridEngine:
         self._recentered = 0
         self._blocked_by_risk = 0
         self._paused_by_liquidity = 0
+        self._paused_by_sentiment = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -182,6 +192,26 @@ class GridEngine:
         await self._place_grid(current, zones)
 
     async def _place_grid(self, center: float, zones) -> None:
+        # Sentiment check first — local I/O only, no exchange call. If
+        # sentiment is sharply negative we don't even need to ask the
+        # exchange about the book. Drift monitor will retry on its next
+        # iteration so the grid auto-resumes once sentiment recovers.
+        if self._sentiment is not None:
+            try:
+                sent_state = self._sentiment.compute()
+                if sent_state.should_pause:
+                    self._paused_by_sentiment += 1
+                    logger.warning("grid placement paused by sentiment",
+                                   symbol=self._config.symbol,
+                                   score=sent_state.score,
+                                   source=sent_state.source,
+                                   reason=sent_state.reason)
+                    return
+            except Exception as e:
+                # Sentiment failure must not stall the engine — fail open
+                # to "neutral" and proceed. The signal class already logs.
+                logger.warning("sentiment compute failed — proceeding", error=str(e))
+
         # Liquidity-adaptive spacing. If the signal says pause (broken
         # market — e.g. exchange degradation, halt, one-sided book), we
         # skip placement entirely. The drift monitor will retry on its
@@ -410,7 +440,8 @@ class GridEngine:
                         filled_total=self._filled,
                         recentered_total=self._recentered,
                         blocked_by_risk=self._blocked_by_risk,
-                        paused_by_liquidity=self._paused_by_liquidity)
+                        paused_by_liquidity=self._paused_by_liquidity,
+                        paused_by_sentiment=self._paused_by_sentiment)
         except Exception:
             logger.exception("SHUTDOWN cancel_all FAILED — check exchange for dangling orders",
                              symbol=self._config.symbol)

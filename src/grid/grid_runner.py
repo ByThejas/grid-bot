@@ -54,6 +54,11 @@ from src.market_data.storage import MarketDataStore
 from src.risk.config import RiskConfig
 from src.risk.manager import RiskManager
 from src.signals.liquidity import LiquidityConfig, LiquiditySignal
+from src.signals.sentiment import (
+    FileSentimentSource,
+    SentimentConfig,
+    SentimentSignal,
+)
 from src.signals.supply_demand import SupplyDemandConfig, SupplyDemandSignal
 from src.utils.logger import get_logger
 
@@ -131,13 +136,29 @@ async def _run(dry_run: bool = False) -> None:
                 min_spacing_to_spread_ratio=liq_cfg.min_spacing_to_spread_ratio,
                 depth_levels=liq_cfg.depth_levels)
 
+    # --- Shared sentiment signal (one per process, all engines consult it) ---
+    # The pause threshold lives at the top level of `signals:` (alongside
+    # the weights) for historical reasons; sub-block holds path/staleness.
+    signals_raw = settings.get("signals", {}) or {}
+    sent_raw = signals_raw.get("sentiment", {}) or {}
+    sent_cfg = SentimentConfig.from_dict(
+        sent_raw,
+        pause_threshold=signals_raw.get("sentiment_pause_threshold"),
+    )
+    sentiment_source = FileSentimentSource(sent_cfg.sentiment_path)
+    sentiment = SentimentSignal(source=sentiment_source, config=sent_cfg)
+    logger.info("sentiment signal wired",
+                pause_threshold=sent_cfg.pause_threshold,
+                sentiment_path=sent_cfg.sentiment_path,
+                max_age_seconds=sent_cfg.max_age_seconds)
+
     # --- One engine per symbol ---
     engines: dict[str, GridEngine] = {}
     for symbol in symbols:
         cfg = GridEngineConfig.from_yaml(symbol, settings)
         engines[symbol] = GridEngine(
             exchange=exchange, config=cfg, signal=signal,
-            risk=risk, liquidity=liquidity,
+            risk=risk, liquidity=liquidity, sentiment=sentiment,
         )
 
     # --- User data stream dispatcher: fan events out to all engines ---
