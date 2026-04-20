@@ -56,6 +56,7 @@ from src.grid.levels import GridParams, compute_grid
 from src.grid.state import GridState
 from src.risk.manager import RiskManager
 from src.signals.base import Signal
+from src.signals.liquidity import LiquiditySignal
 from src.utils.logger import get_logger
 
 logger = get_logger("grid_engine")
@@ -82,6 +83,7 @@ class GridEngine:
         config: GridEngineConfig,
         signal: Optional[Signal] = None,
         risk: Optional[RiskManager] = None,
+        liquidity: Optional[LiquiditySignal] = None,
     ):
         self._exchange = exchange
         self._config = config
@@ -90,13 +92,22 @@ class GridEngine:
         # Optional so existing tests + dry-run rehearsals without a risk
         # config keep working — production runner always passes one.
         self._risk = risk
+        # LiquiditySignal is also shared across engines. Same optionality
+        # rule — absent means use static base_spacing_pct from config.
+        self._liquidity = liquidity
         self._state = GridState()
         self._filters: Optional[SymbolFilter] = None
+        # The spacing the active grid was placed with. Updated each time
+        # _place_grid runs so fill replacements land on the SAME grid the
+        # original order was part of — not on a hypothetical re-derived
+        # one that might differ after a liquidity widening.
+        self._active_spacing_pct: float = config.base_spacing_pct
         # Counters for observability at shutdown.
         self._placed = 0
         self._filled = 0
         self._recentered = 0
         self._blocked_by_risk = 0
+        self._paused_by_liquidity = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -171,10 +182,37 @@ class GridEngine:
         await self._place_grid(current, zones)
 
     async def _place_grid(self, center: float, zones) -> None:
+        # Liquidity-adaptive spacing. If the signal says pause (broken
+        # market — e.g. exchange degradation, halt, one-sided book), we
+        # skip placement entirely. The drift monitor will retry on its
+        # next iteration if the operator hasn't shut us down.
+        spacing_pct = self._config.base_spacing_pct
+        if self._liquidity is not None:
+            try:
+                liq_state = await self._liquidity.compute(
+                    self._config.symbol,
+                    self._config.base_spacing_pct,
+                    self._config.min_spacing_pct,
+                    self._config.max_spacing_pct,
+                )
+                if liq_state.should_pause:
+                    self._paused_by_liquidity += 1
+                    logger.warning("grid placement paused by liquidity",
+                                   symbol=self._config.symbol,
+                                   reason=liq_state.pause_reason)
+                    return
+                spacing_pct = liq_state.recommended_spacing_pct
+            except Exception as e:
+                # Liquidity failure must not stall the engine — fall back
+                # to the operator's configured base spacing.
+                logger.warning("liquidity compute failed — using base spacing",
+                               error=str(e))
+
+        self._active_spacing_pct = spacing_pct
         params = GridParams(
             symbol=self._config.symbol,
             center_price=center,
-            base_spacing_pct=self._config.base_spacing_pct,
+            base_spacing_pct=spacing_pct,
             min_spacing_pct=self._config.min_spacing_pct,
             max_spacing_pct=self._config.max_spacing_pct,
             levels_above=self._config.levels_above,
@@ -196,6 +234,7 @@ class GridEngine:
         logger.info("grid placed",
                     symbol=self._config.symbol,
                     placed=placed, skipped=skipped, failed=failed,
+                    spacing_pct=round(spacing_pct, 4),
                     tracked=len(self._state))
 
     async def _place_level(
@@ -281,9 +320,10 @@ class GridEngine:
                     size=original.size)
 
         # Replacement: mirror across grid center-spacing.
-        # We use the CURRENT configured spacing rather than the original
-        # offset, so that post-recenter fills snap to the new grid.
-        spacing = self._state.center_price * self._config.base_spacing_pct / 100.0
+        # We use the ACTIVE spacing (liquidity-adapted at last placement)
+        # rather than the config default — otherwise post-liquidity-
+        # widening fills would land off the current grid.
+        spacing = self._state.center_price * self._active_spacing_pct / 100.0
         if original.side == "BUY":
             new_side = "SELL"
             new_price = original.price + spacing
@@ -369,7 +409,8 @@ class GridEngine:
                         placed_total=self._placed,
                         filled_total=self._filled,
                         recentered_total=self._recentered,
-                        blocked_by_risk=self._blocked_by_risk)
+                        blocked_by_risk=self._blocked_by_risk,
+                        paused_by_liquidity=self._paused_by_liquidity)
         except Exception:
             logger.exception("SHUTDOWN cancel_all FAILED — check exchange for dangling orders",
                              symbol=self._config.symbol)

@@ -71,6 +71,19 @@ signals:
   # Sentiment score below this pauses the grid entirely
   sentiment_pause_threshold: -0.7
 
+  # Liquidity signal config (Phase 7) — adapts grid spacing to spread,
+  # pauses placement when the market looks broken (wide spread).
+  liquidity:
+    # Pause placement if spread exceeds this (bps). 50 bps = 0.5%.
+    # Binance BTCUSDT normally sits at 1-5 bps; testnet can be wider.
+    pause_spread_bps: 50.0
+    # Grid spacing must be >= this multiple of spread. 4× clears a
+    # 2× spread cost plus 2× fees (0.1% each) with some margin.
+    min_spacing_to_spread_ratio: 4.0
+    # How many book levels to sum for depth imbalance. Matches the
+    # engine's default get_order_book depth.
+    depth_levels: 20
+
   # Supply & Demand detector config (Phase 4)
   supply_demand:
     # --- Footprint imbalance (trade-flow based) ---

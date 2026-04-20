@@ -53,6 +53,7 @@ from src.grid.engine import GridEngine
 from src.market_data.storage import MarketDataStore
 from src.risk.config import RiskConfig
 from src.risk.manager import RiskManager
+from src.signals.liquidity import LiquidityConfig, LiquiditySignal
 from src.signals.supply_demand import SupplyDemandConfig, SupplyDemandSignal
 from src.utils.logger import get_logger
 
@@ -121,11 +122,23 @@ async def _run(dry_run: bool = False) -> None:
                 daily_loss_limit_usd=risk_cfg.daily_loss_limit_usd,
                 kill_switch_path=risk_cfg.kill_switch_path)
 
+    # --- Shared liquidity signal (one per process, all engines consult it) ---
+    liq_raw = settings.get("signals", {}).get("liquidity", {}) or {}
+    liq_cfg = LiquidityConfig.from_dict(liq_raw)
+    liquidity = LiquiditySignal(exchange=exchange, config=liq_cfg)
+    logger.info("liquidity signal wired",
+                pause_spread_bps=liq_cfg.pause_spread_bps,
+                min_spacing_to_spread_ratio=liq_cfg.min_spacing_to_spread_ratio,
+                depth_levels=liq_cfg.depth_levels)
+
     # --- One engine per symbol ---
     engines: dict[str, GridEngine] = {}
     for symbol in symbols:
         cfg = GridEngineConfig.from_yaml(symbol, settings)
-        engines[symbol] = GridEngine(exchange=exchange, config=cfg, signal=signal, risk=risk)
+        engines[symbol] = GridEngine(
+            exchange=exchange, config=cfg, signal=signal,
+            risk=risk, liquidity=liquidity,
+        )
 
     # --- User data stream dispatcher: fan events out to all engines ---
     # Each engine filters for its own symbol, so a duplicate dispatch is
