@@ -73,7 +73,7 @@ from src.signals.sentiment import (
     SentimentSignal,
 )
 from src.signals.supply_demand import SupplyDemandConfig, SupplyDemandSignal
-from src.utils.logger import get_logger
+from src.utils.logger import configure_logging, get_logger
 
 logger = get_logger("grid_runner")
 
@@ -91,6 +91,12 @@ async def _run(dry_run: bool = False,
                live_ack: bool = False) -> None:
     load_dotenv()
     settings = _load_settings()
+
+    # Wire stdlib + structlog now so every line below (including the env
+    # banner / errors) lands in logs/grid_bot.log as well as stderr. Phase 10C
+    # discovered this had been a no-op since Phase 1 — settings.logging.file
+    # was being read by nothing.
+    configure_logging(settings)
 
     # --- Env resolution (Phase 10) ---------------------------------------
     # Decide testnet vs mainnet BEFORE we print anything or load keys. The
