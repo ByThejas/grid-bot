@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Grid Bot — Strategy, Risk & Architecture Overview</title>
+<style>
+  :root {
+    --navy: #1a2b4b;
+    --slate: #334155;
+    --grey: #64748b;
+    --mist: #f5f7fa;
+    --line: #e2e8f0;
+    --buy: #1f7a4c;
+    --sell: #b83b3b;
+    --warn: #b45309;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--slate);
+    line-height: 1.55;
+    font-size: 11.5pt;
+    background: white;
+  }
+  .page {
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 48px 56px;
+  }
+  h1, h2, h3, h4 {
+    color: var(--navy);
+    font-weight: 600;
+    line-height: 1.25;
+  }
+  h1 { font-size: 32pt; margin: 0 0 8px; letter-spacing: -0.5px; }
+  h2 { font-size: 18pt; margin: 36px 0 14px; padding-bottom: 6px; border-bottom: 2px solid var(--navy); }
+  h3 { font-size: 13pt; margin: 22px 0 8px; }
+  h4 { font-size: 11.5pt; margin: 16px 0 6px; color: var(--slate); }
+  p { margin: 0 0 10px; }
+  ul, ol { margin: 6px 0 12px; padding-left: 22px; }
+  li { margin-bottom: 4px; }
+  strong { color: var(--navy); }
+  .subtitle { font-size: 14pt; color: var(--grey); margin: 0 0 36px; font-weight: 400; }
+  .cover {
+    min-height: 9.5in;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    page-break-after: always;
+  }
+  .cover h1 { font-size: 42pt; }
+  .cover .tagline { font-size: 16pt; color: var(--grey); margin: 8px 0 60px; }
+  .cover .meta { margin-top: 100px; font-size: 10.5pt; color: var(--grey); }
+  .meta strong { color: var(--slate); }
+
+  .callout {
+    background: var(--mist);
+    border-left: 4px solid var(--navy);
+    padding: 14px 18px;
+    margin: 18px 0;
+    border-radius: 2px;
+  }
+  .warn {
+    background: #fef6e7;
+    border-left-color: var(--warn);
+  }
+  .risk-box {
+    background: #fff4f4;
+    border: 1px solid #f4c7c7;
+    padding: 18px 22px;
+    margin: 20px 0;
+    border-radius: 4px;
+    font-size: 10.5pt;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0 18px;
+    font-size: 10.5pt;
+  }
+  th, td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  th {
+    background: var(--mist);
+    color: var(--navy);
+    font-weight: 600;
+  }
+
+  .grid-viz {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 2px;
+    margin: 18px auto;
+    max-width: 420px;
+    font-family: "Consolas", "Monaco", monospace;
+    font-size: 10.5pt;
+  }
+  .grid-viz .row {
+    display: grid;
+    grid-template-columns: 100px 1fr 80px;
+    padding: 6px 12px;
+    border-radius: 3px;
+  }
+  .grid-viz .sell { background: #fdeaea; color: var(--sell); }
+  .grid-viz .buy  { background: #e7f4ec; color: var(--buy); }
+  .grid-viz .mid  { background: var(--navy); color: white; text-align: center; font-weight: 600; padding: 8px 12px; border-radius: 3px; }
+  .grid-viz .price { font-weight: 600; }
+
+  .pillars {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 14px;
+    margin: 16px 0;
+  }
+  .pillar {
+    background: var(--mist);
+    padding: 14px;
+    border-radius: 4px;
+    border-top: 3px solid var(--navy);
+    font-size: 10.5pt;
+  }
+  .pillar h4 { margin-top: 0; }
+
+  .phase-grid {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 8px 16px;
+    margin: 14px 0;
+    font-size: 10.5pt;
+  }
+  .phase-grid .done { color: var(--buy); font-weight: 600; }
+  .phase-grid .wip  { color: var(--warn); font-weight: 600; }
+  .phase-grid .todo { color: var(--grey); font-weight: 600; }
+
+  .arch {
+    display: grid;
+    gap: 10px;
+    margin: 18px auto;
+    max-width: 520px;
+    font-size: 10.5pt;
+  }
+  .arch-node {
+    background: white;
+    border: 2px solid var(--navy);
+    border-radius: 6px;
+    padding: 10px 14px;
+    text-align: center;
+    font-weight: 500;
+  }
+  .arch-node .label { font-size: 9pt; color: var(--grey); display: block; margin-top: 2px; font-weight: 400; }
+  .arch-arrow {
+    text-align: center;
+    color: var(--grey);
+    font-family: "Consolas", "Monaco", monospace;
+    font-size: 14pt;
+    line-height: 1;
+    margin: -2px 0;
+  }
+  .arch-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .arch-core {
+    background: var(--navy);
+    color: white;
+    border-color: var(--navy);
+  }
+  .arch-core .label { color: #cbd5e1; }
+
+  .tg-chat {
+    max-width: 360px;
+    margin: 16px auto;
+    background: #e6ebf5;
+    border-radius: 12px;
+    padding: 14px;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 10pt;
+  }
+  .tg-header {
+    font-weight: 600;
+    color: var(--navy);
+    margin-bottom: 10px;
+    font-size: 10pt;
+  }
+  .tg-msg {
+    background: white;
+    border-radius: 10px;
+    padding: 8px 11px;
+    margin-bottom: 6px;
+    line-height: 1.4;
+  }
+  .tg-msg .tag {
+    display: inline-block;
+    font-size: 8.5pt;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-right: 6px;
+  }
+  .tag-fill  { background: #e7f4ec; color: var(--buy); }
+  .tag-halt  { background: #fdeaea; color: var(--sell); }
+  .tag-beat  { background: #e6eefa; color: var(--navy); }
+  .tag-warn  { background: #fef6e7; color: var(--warn); }
+  .tg-msg .body { font-size: 10pt; color: var(--slate); }
+  .tg-cmd {
+    text-align: right;
+  }
+  .tg-cmd .tg-msg {
+    display: inline-block;
+    background: #d4e8ff;
+    color: var(--navy);
+    font-family: "Consolas", "Monaco", monospace;
+  }
+
+  .footer {
+    margin-top: 40px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+    font-size: 9pt;
+    color: var(--grey);
+    text-align: center;
+  }
+
+  section { page-break-inside: avoid; }
+  h2 { page-break-after: avoid; }
+  .page-break { page-break-before: always; }
+
+  @media print {
+    .page { padding: 36px 48px; max-width: 100%; }
+    body { font-size: 10.5pt; }
+    h1 { font-size: 24pt; }
+    h2 { font-size: 15pt; margin-top: 28px; }
+    .cover { min-height: 9.5in; }
+    @page { margin: 0.6in; size: A4; }
+  }
+</style>
+</head>
+<body>
+
+<div class="page cover">
+  <div>
+    <h1>Grid Bot</h1>
+    <div class="tagline">An automated crypto trading system for BTC and ETH, built around a three-signal decision model and multi-layered risk controls.</div>
+  </div>
+  <div class="meta">
+    <p><strong>Status:</strong> Testnet-validated · Mainnet canary imminent</p>
+    <p><strong>Markets:</strong> BTC/USDT &nbsp;&middot;&nbsp; ETH/USDT (Binance Spot)</p>
+    <p><strong>Document version:</strong> April 2026</p>
+  </div>
+</div>
+
+<div class="page">
+
+<section>
+<h2>1. Executive Summary</h2>
+
+<p><strong>What it is.</strong> Grid Bot is an automated trading system that places a ladder of buy and sell orders around the current market price on two cryptocurrency pairs: Bitcoin–USDT and Ethereum–USDT. When price moves up and fills a sell order, the bot replaces it with a new buy below. When price moves down and fills a buy, it replaces it with a new sell above. Each completed round trip — buy low, sell higher — captures a small profit from price oscillation.</p>
+
+<p><strong>How it makes money.</strong> Markets don't move in straight lines. Even on a day when Bitcoin closes flat, price may swing 2–3% up and down multiple times. A grid bot mechanically extracts small profits from those swings, 24 hours a day, without needing to predict direction.</p>
+
+<p><strong>What makes this bot different.</strong> Most grid bots are "dumb" — they place orders and let the market handle the rest. This system layers three independent decision signals on top:</p>
+<ul>
+  <li><strong>Supply &amp; Demand</strong> — detects price zones where large orders have historically reacted.</li>
+  <li><strong>Liquidity</strong> — measures how healthy the order book is right now, and pauses trading when it isn't.</li>
+  <li><strong>News &amp; Sentiment</strong> — reads real-time market sentiment and pauses the bot during strongly-negative news events.</li>
+</ul>
+
+<p>The bot deliberately avoids classical technical indicators (RSI, MACD, moving averages, Bollinger Bands). Those are widely used and therefore widely priced-in. The three signals above are harder to extract and produce a different decision surface.</p>
+
+<p><strong>Current status.</strong> Eleven of twelve planned phases are complete. The system has been validated through a 25-hour continuous run on Binance's testnet (simulated money, real market data) with clean behavior and no incidents. A real-money canary launch with $200 is the next step.</p>
+</section>
+
+<section>
+<h2>2. Grid Trading in Plain English</h2>
+
+<p>Imagine a staircase laid over the current price of Bitcoin. Each step up is a sell order waiting to be filled. Each step down is a buy order waiting to be filled.</p>
+
+<div class="grid-viz">
+  <div class="row sell"><span>SELL</span><span>Sell 0.0003 BTC</span><span class="price">$76,200</span></div>
+  <div class="row sell"><span>SELL</span><span>Sell 0.0003 BTC</span><span class="price">$75,900</span></div>
+  <div class="mid">Current price: $75,600</div>
+  <div class="row buy"><span>BUY</span><span>Buy 0.0003 BTC</span><span class="price">$75,300</span></div>
+  <div class="row buy"><span>BUY</span><span>Buy 0.0003 BTC</span><span class="price">$75,000</span></div>
+</div>
+
+<p>Every time price rises to $75,900 and fills the first sell, the bot immediately places a new buy at $75,600 — one step below. Every time price falls to $75,300 and fills the first buy, a new sell gets placed at $75,600 — one step above. The spacing is designed so that each round trip covers trading fees and leaves a small profit.</p>
+
+<h3>When this works well</h3>
+<p>Grid trading thrives in <strong>sideways</strong> or <strong>oscillating</strong> markets — exactly the conditions where prediction-based strategies struggle. Bitcoin, for all its reputation, spends most of its time in ranges.</p>
+
+<h3>When it struggles</h3>
+<p>In a strong one-way trend (continuous up or continuous down), a grid bot can end up holding only one side — e.g. lots of base asset bought on the way down. The bot addresses this by <em>recentering</em>: if price drifts more than 2% from the grid's middle, the bot cancels all orders and rebuilds the ladder around the new price. Every recenter is a small loss, but it prevents the much larger loss of being stuck with stale orders far from market.</p>
+</section>
+
+</div>
+
+<div class="page page-break">
+
+<section>
+<h2>3. How the Bot Decides — The Three Signals</h2>
+
+<p>Most trading bots decide using indicators everyone else is also using (RSI, MACD, moving averages). This one doesn't. Instead, three independent signals shape where the grid goes, how wide its spacing is, and whether to trade at all.</p>
+
+<div class="pillars">
+  <div class="pillar">
+    <h4>Supply &amp; Demand</h4>
+    <p>Looks at the order book and recent trade flow to find <strong>reaction zones</strong> — price areas where large orders have absorbed selling pressure (support) or buying pressure (resistance) in the past few hours. The grid avoids placing against these walls.</p>
+  </div>
+  <div class="pillar">
+    <h4>Liquidity</h4>
+    <p>Measures the current <strong>spread</strong> (gap between best buy and best sell), order-book <strong>depth imbalance</strong>, and book health. If the spread widens past 0.5% — a sign of broken or illiquid conditions — the bot pauses new placements immediately.</p>
+  </div>
+  <div class="pillar">
+    <h4>News &amp; Sentiment</h4>
+    <p>Reads a real-time sentiment score from news and social feeds. When a strongly-negative score arrives (e.g. an exploit or a regulatory shock), the bot pauses placing <em>new</em> grids so it's not walking into a falling knife. Existing orders keep their exit path.</p>
+  </div>
+</div>
+
+<p><strong>Why no RSI/MACD/moving averages?</strong> Those indicators are everywhere — every retail dashboard, every copy-paste strategy, every textbook. Whatever edge they had is long since priced in. The three signals used here require real work to extract and aren't displayed on anyone's default chart view.</p>
+
+<p><strong>How the signals interact:</strong></p>
+<ul>
+  <li><strong>Supply &amp; Demand</strong> biases <em>where</em> the grid levels sit — the ladder avoids placing inside major walls.</li>
+  <li><strong>Liquidity</strong> adjusts <em>how wide</em> the spacing is — wider spread means wider grid so trading costs don't eat the cycle.</li>
+  <li><strong>News &amp; Sentiment</strong> acts as a <em>circuit breaker</em> — it can pause the bot but cannot force it to trade.</li>
+</ul>
+</section>
+
+<section>
+<h2>4. Safety &amp; Risk Management</h2>
+
+<p>Trading with real money without rigorous risk controls is how people blow up accounts overnight. This bot runs seven independent safety layers, any one of which can stop new trades from being placed.</p>
+
+<table>
+  <thead><tr><th>Control</th><th>What it does</th><th>Canary setting</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Manual kill switch</strong></td><td>A sentinel file the operator can create from their phone or laptop. When detected, the bot cancels all orders and exits. One-way — doesn't auto-recover.</td><td>Always on</td></tr>
+    <tr><td><strong>Daily loss floor</strong></td><td>Tracks running 24-hour realized losses. Triggers the kill switch if losses exceed a set floor.</td><td>$20 (≈10% of capital)</td></tr>
+    <tr><td><strong>Max open orders</strong></td><td>Hard cap on orders open at any time. Bounds damage from any bug that tries to place runaway orders.</td><td>10 total</td></tr>
+    <tr><td><strong>Sentiment pause</strong></td><td>Pauses new placements when sentiment score drops past a threshold. Existing positions keep their exit path.</td><td>Threshold −0.7</td></tr>
+    <tr><td><strong>Liquidity pause</strong></td><td>Pauses placements when bid-ask spread widens past a threshold (broken book signal).</td><td>Spread &gt; 0.5%</td></tr>
+    <tr><td><strong>Spacing safety rail</strong></td><td>Forces grid spacing to always be at least 4× the current spread — so trading fees can never eat a complete cycle.</td><td>Enforced</td></tr>
+    <tr><td><strong>Grid spacing bounds</strong></td><td>Hard minimum (0.15%) and maximum (1.0%) spacing so adaptive signals cannot push the grid into extreme configurations.</td><td>Enforced</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+<strong>Honest disclosure — what is NOT automated yet.</strong> A percentage-based exposure cap, per-trade stop loss, and tiered drawdown halts exist in the bot's configuration file but are not yet wired into code. These land in a later phase. For the canary launch, the absolute-dollar loss floor is the primary safety net.
+</div>
+</section>
+
+</div>
+
+<div class="page page-break">
+
+<section>
+<h2>5. Technology</h2>
+
+<h3>Stack</h3>
+<ul>
+  <li><strong>Language:</strong> Python 3.11, async-first architecture (one event loop, multiple concurrent symbols).</li>
+  <li><strong>Exchange:</strong> Binance Spot (primary); the code layer that talks to the exchange is abstracted so Bybit or OKX can be added later without rewriting the strategy.</li>
+  <li><strong>Market data:</strong> Captured live via Binance's public WebSocket feed, stored in a local SQLite database for backtests and analysis.</li>
+  <li><strong>Authentication:</strong> Two-key design. A traditional REST key places orders; a separate Ed25519 cryptographic key signs the WebSocket session for real-time fill notifications. This is the modern Binance-required pattern.</li>
+  <li><strong>Logging:</strong> Structured JSON logs with automatic rotation at 50 MB × 5 files. Every event (order, fill, recenter, heartbeat, halt) is searchable.</li>
+  <li><strong>Observability:</strong> A heartbeat line every 5 minutes plus an atomic status snapshot file any external dashboard or watcher can read without attaching to the process.</li>
+</ul>
+
+<h3>Architecture at a glance</h3>
+<ol>
+  <li><strong>Market data layer</strong> ingests trades and order books.</li>
+  <li><strong>Signal layer</strong> (three modules) produces per-symbol decisions.</li>
+  <li><strong>Grid engine</strong> places and replaces orders based on those signals.</li>
+  <li><strong>Risk layer</strong> sits between the grid engine and the exchange — every placement is checked against the safety rules before it goes out.</li>
+  <li><strong>Observability layer</strong> writes heartbeats and status snapshots.</li>
+</ol>
+
+<h3>Deployment (current)</h3>
+<p>Currently runs on a local laptop for the canary phase. Planned migration to a small cloud virtual machine immediately after canary stability — explained in detail in the next section.</p>
+</section>
+
+<section>
+<h2>6. The Full System Vision — Cloud + Phone Alerts</h2>
+
+<div class="callout warn">
+<strong>In development — not yet live.</strong> This section explains how the fully-deployed system will operate once two planned phases are complete. Today the bot runs on a laptop and logs to a terminal. The architecture below is the target state, expected within four to six weeks of the canary launch.
+</div>
+
+<h3>6.1 Always-On Operation in the Cloud (AWS)</h3>
+
+<p>Right now, the bot runs on the operator's laptop. If the laptop turns off, goes to sleep, or loses internet, the bot stops reacting to the market — orders stay live on Binance, but the safety layers and replacement logic go offline with it.</p>
+
+<p>The planned deployment moves the bot to a small <strong>AWS EC2 instance</strong> — effectively a tiny always-on computer rented from Amazon's data center. From the operator's point of view:</p>
+
+<ul>
+  <li><strong>No laptop dependency.</strong> The operator can close their laptop, lose power at home, travel to another country. The bot keeps trading.</li>
+  <li><strong>Auto-restart on crash.</strong> The bot runs as a system service. If the Python process exits for any reason (bug, memory issue, network glitch), the operating system restarts it within seconds.</li>
+  <li><strong>Cost: roughly $3–5 per month.</strong> Less than a streaming subscription. A single small virtual machine is enough — the bot is not resource-hungry.</li>
+  <li><strong>Logs are durable.</strong> Every trade, every heartbeat, every decision gets written to Amazon CloudWatch. The operator can audit exactly what the bot did on any given day, months later.</li>
+  <li><strong>Security.</strong> Access to the machine requires an SSH cryptographic key — passwords are disabled. Binance API keys on the machine are IP-whitelisted, so even if leaked they cannot be used from anywhere else.</li>
+</ul>
+
+<p>The "AWS stack" often associated with production software — Kubernetes, Lambda functions, managed databases — is deliberately avoided here. Those are appropriate for systems serving thousands of concurrent users. A single-purpose trading bot runs perfectly on a single small virtual machine, and the simpler architecture means fewer things can break at 3 a.m.</p>
+
+<h3>6.2 Real-Time Phone Alerts via Telegram</h3>
+
+<p>When the bot is running in the cloud, the operator has no terminal window to watch. Notifications need to reach the operator's phone the moment something important happens. The planned solution is a <strong>private Telegram bot</strong> that the operator alone controls.</p>
+
+<p><strong>What triggers an alert:</strong></p>
+<ul>
+  <li>Every fill (buy or sell executed on the exchange)</li>
+  <li>Kill-switch activations (automatic or manual)</li>
+  <li>Daily drawdown threshold breaches</li>
+  <li>Missed heartbeats (the bot is silent when it shouldn't be)</li>
+  <li>Process crashes and auto-restarts</li>
+  <li>Sentiment or liquidity pauses triggering</li>
+</ul>
+
+<p>Example of what the Telegram stream looks like during normal operation:</p>
+
+<div class="tg-chat">
+  <div class="tg-header">Grid Bot Alerts · Private Channel</div>
+  <div class="tg-msg"><span class="tag tag-fill">FILL</span><span class="body">Sold 0.0003 BTC at $75,912 &nbsp;·&nbsp; round-trip PnL +$0.19</span></div>
+  <div class="tg-msg"><span class="tag tag-beat">BEAT</span><span class="body">Uptime 14h 32m &nbsp;·&nbsp; open orders 8 &nbsp;·&nbsp; 24h PnL +$3.42</span></div>
+  <div class="tg-msg"><span class="tag tag-warn">PAUSE</span><span class="body">Liquidity pause triggered on ETHUSDT (spread 62 bps, threshold 50)</span></div>
+  <div class="tg-msg"><span class="tag tag-fill">FILL</span><span class="body">Bought 0.0003 BTC at $75,601 &nbsp;·&nbsp; grid replacement queued</span></div>
+  <div class="tg-msg"><span class="tag tag-halt">HALT</span><span class="body">Daily loss floor breached (-$21.40 &gt;= -$20.00). All orders cancelled. Bot stopped.</span></div>
+</div>
+
+<p><strong>Two-way control.</strong> The Telegram bot also accepts commands from the operator's phone, so you can check status or halt the bot from anywhere in the world:</p>
+
+<div class="tg-chat">
+  <div class="tg-header">Commands from phone</div>
+  <div class="tg-cmd"><span class="tg-msg">/status</span></div>
+  <div class="tg-msg"><span class="tag tag-beat">STATUS</span><span class="body">Running · 8 open orders · 24h PnL +$3.42 · no halts · uptime 14h 32m</span></div>
+  <div class="tg-cmd"><span class="tg-msg">/halt</span></div>
+  <div class="tg-msg"><span class="tag tag-halt">HALT</span><span class="body">Manual halt received. Cancelling all orders and stopping.</span></div>
+</div>
+
+<p><strong>Privacy and security.</strong> The Telegram bot is private. Only messages from the operator's verified chat ID are accepted; any message from any other account is silently ignored. This means even if someone discovers the bot's Telegram handle, they cannot issue commands.</p>
+
+<h3>6.3 How It All Connects</h3>
+
+<p>The full data flow once deployed:</p>
+
+<div class="arch">
+  <div class="arch-node">Binance Spot Exchange<span class="label">BTCUSDT · ETHUSDT</span></div>
+  <div class="arch-arrow">&updownarrow;</div>
+  <div class="arch-node arch-core">AWS EC2 — Grid Bot<span class="label">Signals &middot; Grid engine &middot; Risk layer</span></div>
+  <div class="arch-arrow">&darr;</div>
+  <div class="arch-row">
+    <div class="arch-node">Telegram Bot<span class="label">Alerts out / commands in</span></div>
+    <div class="arch-node">CloudWatch Logs<span class="label">Searchable audit trail</span></div>
+  </div>
+  <div class="arch-arrow">&darr;</div>
+  <div class="arch-node">Operator's Phone<span class="label">Receives alerts · sends commands</span></div>
+</div>
+
+<h3>6.4 What This Gives the Operator</h3>
+
+<table>
+  <thead><tr><th>Capability</th><th>Before (laptop only)</th><th>After (cloud + Telegram)</th></tr></thead>
+  <tbody>
+    <tr><td>Bot reacts while operator sleeps</td><td>Only if laptop is on</td><td>Always</td></tr>
+    <tr><td>Notification of fills and halts</td><td>Only by watching terminal</td><td>Phone ping within seconds</td></tr>
+    <tr><td>Emergency halt while away from home</td><td>Not possible</td><td>One Telegram message</td></tr>
+    <tr><td>Audit trail of past trades</td><td>Local log files</td><td>Cloud logs, searchable for months</td></tr>
+    <tr><td>Operator cost</td><td>Free (but tied to laptop)</td><td>~$3–6 per month</td></tr>
+    <tr><td>Single points of failure</td><td>Laptop power, home internet, Windows Update</td><td>Cloud provider (~99.99% uptime SLA)</td></tr>
+  </tbody>
+</table>
+</section>
+
+<section>
+<h2>7. What Has Been Tested</h2>
+
+<div class="callout">
+  <strong>Plain-language disclaimer.</strong> The numbers below come from a <em>testnet</em> (simulated money on real market data) and a <em>backtest</em> (simulated market on historical or synthetic data). They are NOT real-money results. Past results, simulated or real, do not predict future performance.
+</div>
+
+<h3>25-Hour Live Testnet Soak (April 2026)</h3>
+<ul>
+  <li>Duration: 25.5 hours of continuous operation</li>
+  <li>Orders executed: 279 fills across BTC and ETH</li>
+  <li>Heartbeat reliability: 288 scheduled status beats, zero missed</li>
+  <li>Incidents: zero. Clean shutdown on manual Ctrl+C.</li>
+  <li>Simulated realized gain: +$38.66 across the run (on simulated funds)</li>
+</ul>
+
+<h3>Backtest — Synthetic Market (5,000 ticks)</h3>
+<ul>
+  <li>Orders placed: 40 &nbsp;&middot;&nbsp; Fills: 209 &nbsp;&middot;&nbsp; Grid recenters: 9</li>
+  <li>Simulated result: +$3.54 profit &nbsp;&middot;&nbsp; worst drawdown: −$2.55</li>
+  <li>Purpose: validate the grid engine's replacement logic, recenter behavior, and PnL accounting with a reproducible seed.</li>
+</ul>
+
+<h3>What is still unverified</h3>
+<ul>
+  <li>Real-money behavior — the canary launch is specifically designed to test this.</li>
+  <li>Sentiment signal on live news flow (works in simulation; needs real market conditions).</li>
+  <li>Liquidity pause trigger under a genuinely wide spread (the testnet book is too healthy to trigger it).</li>
+</ul>
+</section>
+
+</div>
+
+<div class="page page-break">
+
+<section>
+<h2>8. Development Phases</h2>
+
+<p>The bot was built incrementally. Each phase was tested and committed before the next began, so a regression in any phase can be bisected to a single commit.</p>
+
+<div class="phase-grid">
+  <span class="done">&#10003;</span> <span><strong>Phase 1</strong> &mdash; Scaffolding, configuration, structured logging</span> <span>Complete</span>
+  <span class="done">&#10003;</span> <span><strong>Phase 2</strong> &mdash; Binance adapter, testnet connectivity</span> <span>Complete</span>
+  <span class="done">&#10003;</span> <span><strong>Phase 3</strong> &mdash; Market data ingestor (trade + order book capture)</span> <span>Complete</span>
+  <span class="done">&#10003;</span> <span><strong>Phase 4</strong> &mdash; Supply &amp; Demand zone detector</span> <span>Complete</span>
+  <span class="done">&#10003;</span> <span><strong>Phase 5</strong> &mdash; Grid engine, real-time fill stream, dry-run mode</span> <span>Complete</span>
+  <span class="done">&#10003;</span> <span><strong>Phase 6</strong> &mdash; Risk layer and kill switch</span> <span>Complete</span>
+  <span class="done">&#10003;</span> <span><strong>Phase 7</strong> &mdash; Liquidity signal</span> <span>Complete</span>
+  <span class="done">&#10003;</span> <span><strong>Phase 8</strong> &mdash; News and sentiment signal</span> <span>Complete</span>
+  <span class="done">&#10003;</span> <span><strong>Phase 9</strong> &mdash; Backtest harness with two replay modes</span> <span>Complete</span>
+  <span class="done">&#10003;</span> <span><strong>Phase 10A</strong> &mdash; Mainnet environment gate (requires explicit opt-in)</span> <span>Complete</span>
+  <span class="done">&#10003;</span> <span><strong>Phase 10B</strong> &mdash; Observability (heartbeat, daily summary, status snapshot)</span> <span>Complete</span>
+  <span class="done">&#10003;</span> <span><strong>Phase 10C</strong> &mdash; 25-hour testnet soak test</span> <span>Complete</span>
+  <span class="wip">&#x25CF;</span>  <span><strong>Phase 10D</strong> &mdash; Real-money canary, $200 capital, 4 orders per symbol</span> <span>Imminent</span>
+  <span class="todo">&deg;</span>   <span><strong>Phase 11A</strong> &mdash; Telegram alerts for fills, halts, and missed heartbeats</span> <span>Planned</span>
+  <span class="todo">&deg;</span>   <span><strong>Phase 11B</strong> &mdash; Local status page with live metrics and halt button</span> <span>Planned</span>
+  <span class="todo">&deg;</span>   <span><strong>Phase 11C</strong> &mdash; Migration to small cloud VM (always-on operation)</span> <span>Planned</span>
+  <span class="todo">&deg;</span>   <span><strong>Phase 11D</strong> &mdash; Dynamic balance-adjusted sizing (order size as % of equity)</span> <span>Planned</span>
+</div>
+</section>
+
+<section>
+<h2>9. Roadmap Beyond the Canary</h2>
+
+<h3>Short term (weeks)</h3>
+<ul>
+  <li><strong>Telegram alerts</strong> — instant phone notifications for fills, kill-switch events, missed heartbeats, and crashes.</li>
+  <li><strong>Local status page</strong> — a simple web page accessible from the operator's phone showing bot uptime, current orders, recent fills, and a one-tap kill button.</li>
+  <li><strong>Cloud migration</strong> — a small virtual machine (approximately $3–6 per month) running the bot 24/7 with automatic restart on crash.</li>
+</ul>
+
+<h3>Medium term (months)</h3>
+<ul>
+  <li><strong>Dynamic position sizing</strong> — order size auto-adjusted to a fixed percentage of current account equity, so the bot scales with capital without manual config edits.</li>
+  <li><strong>Tiered drawdown halts</strong> — graduated responses to losses: soft halt halves order size, hard halt pauses new placements, kill halt cancels everything.</li>
+  <li><strong>Post-trade analytics</strong> — a searchable log of every trade with market conditions at the time, so the operator can manually tune parameters based on accumulated real data.</li>
+</ul>
+
+<h3>Long term (6+ months)</h3>
+<ul>
+  <li>Multi-exchange routing (Bybit, OKX as failover).</li>
+  <li>Additional pairs beyond BTC and ETH.</li>
+  <li>Formal production deployment if real-money performance warrants it.</li>
+</ul>
+
+<p><strong>What is deliberately NOT on the roadmap:</strong> machine-learning self-modification features ("the bot learns from its trades"). These sound appealing but are a well-documented way to destroy trading systems through overfitting on too-small samples. Professional quant funds with thousands of times more data struggle with this; at this scale it is net harmful. Deterministic parameter-tuning based on human analysis of accumulated data is safer and more effective.</p>
+</section>
+
+</div>
+
+<div class="page page-break">
+
+<section>
+<h2>10. Risk Disclosure</h2>
+
+<div class="risk-box">
+<p><strong>Please read this section carefully.</strong></p>
+
+<p><strong>This is an experimental trading system.</strong> It has been validated on a simulated testnet environment only. It has not yet operated with real money for any material period of time.</p>
+
+<p><strong>Cryptocurrency trading carries risk of substantial or total loss.</strong> Prices can move sharply against a position at any time, including during hours when the operator is asleep or offline. Market outages, exchange failures, and network disruptions can prevent the bot from reacting to adverse conditions.</p>
+
+<p><strong>Past performance — whether simulated, backtested, or live — does not predict future results.</strong> The +$38.66 testnet figure and the +$3.54 backtest figure shown in this document are single observations under specific conditions, not repeatable forecasts. A bot that performed well in one week can lose money the next week.</p>
+
+<p><strong>No regulatory approval.</strong> This system is a personal engineering project operated by a single individual. It has no regulatory license, no audit, no insurance, and no guarantee. It is not investment advice and does not constitute a financial product.</p>
+
+<p><strong>Known limitations.</strong></p>
+<ul>
+  <li>Requires the operator's laptop or VM to be continuously powered on to react to market conditions. During any outage, open orders remain on the exchange but no new replacements or safety reactions occur.</li>
+  <li>A percentage-based exposure cap and per-trade stop loss are defined in configuration but not yet wired into the code.</li>
+  <li>The bot has no understanding of holding periods, tax implications, or regulatory reporting. All such considerations are the operator's responsibility.</li>
+  <li>Kill-switch protection requires the bot process itself to be running. A process crash during an adverse price event removes automatic protection.</li>
+</ul>
+
+<p><strong>Operator responsibilities.</strong> Running this bot with real money requires (a) comfort with reading code and logs, (b) ability to cancel orders manually on the exchange if the bot becomes unresponsive, (c) capital the operator can afford to lose in full, and (d) understanding that the safety controls in this document are best-effort engineering, not guarantees.</p>
+</div>
+</section>
+
+<section>
+<h2>11. Summary</h2>
+
+<p>Grid Bot is a carefully engineered, transparently documented, and deliberately conservative approach to automated crypto trading. It is built on the belief that the edge in this domain comes from:</p>
+
+<ol>
+  <li><strong>Doing the basics rigorously</strong> — structured logging, version control, backtesting, incremental phased development.</li>
+  <li><strong>Using signals others aren't</strong> — supply &amp; demand, liquidity, and sentiment rather than the same indicators every retail bot uses.</li>
+  <li><strong>Putting safety first</strong> — seven independent safety layers, a manual kill switch, and an explicit tiny-canary phase before any real scale-up.</li>
+  <li><strong>Honest limits</strong> — what is proven is proven; what isn't proven is clearly labeled.</li>
+</ol>
+
+<p>The canary launch with $200 of real capital is the first real-world test. If it survives the first few days cleanly, the path forward is incremental: add alerting, add cloud deployment, add dynamic sizing, and re-evaluate.</p>
+
+<p>If it fails, the kill switch trips, the loss is bounded, and we learn.</p>
+
+<div class="footer">
+  Grid Bot — Strategy &amp; Architecture Overview<br>
+  Prepared April 2026. For discussion purposes only. Not investment advice.
+</div>
+</section>
+
+</div>
+
+</body>
+</html>

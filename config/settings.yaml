@@ -19,8 +19,8 @@ trading:
 grid:
   # Number of grid levels above AND below current price
   # Total orders = levels_above + levels_below
-  levels_above: 5
-  levels_below: 5
+  levels_above: 2
+  levels_below: 2
 
   # Base spacing as percentage of current price
   # 0.3% of $60,000 = $180 spacing
@@ -33,8 +33,8 @@ grid:
 
   # Order size per grid level (in base asset)
   order_size:
-    BTCUSDT: 0.001          # 0.001 BTC per level (~$60 at $60k)
-    ETHUSDT: 0.01            # 0.01 ETH per level (~$30 at $3k)
+    BTCUSDT: 0.0003          # canary: ~$22 at $75k (was 0.001)
+    ETHUSDT: 0.005           # canary: ~$12 at $2.4k (was 0.01)
 
   # Re-centering: when price moves this far from grid center,
   # cancel and rebuild the grid around new price
@@ -71,10 +71,11 @@ risk_overrides:
     # the mainnet path. 2 symbols × ~5 levels/side would hit 20; we cap
     # to 10 so a runaway loop is bounded to roughly "one grid worth".
     max_open_orders: 10
-    # Real money floor, in USD. $50 is the canary ceiling: if the rolling
-    # 24h realized PnL dips below -$50 the kill switch trips and we stop.
-    # Tighten further (to e.g. $20) for the first live canary day.
-    daily_loss_limit_usd: 50.0
+    # Real money floor, in USD. $20 for the first canary day — roughly
+    # 13% of a $150 wallet. If rolling 24h realized PnL dips below -$20
+    # the kill switch trips and we stop. Raise to $50 once stability is
+    # proven over a few days.
+    daily_loss_limit_usd: 20.0
 
 # --- Signal weights ---
 # How much each signal influences grid decisions

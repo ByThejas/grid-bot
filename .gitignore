@@ -26,6 +26,9 @@ logs/
 *.log
 data/
 
+# Backtest output
+reports/
+
 # Runtime sentinels and state (HALT, SENTIMENT, STATUS.json) — live state, not source
 runtime/
 

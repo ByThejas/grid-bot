@@ -26,6 +26,7 @@ WHEN TO USE WHICH MODE
 
 import argparse
 import asyncio
+import pathlib
 import sys
 
 from src.backtest.runner import BacktestOptions, BacktestRunner
@@ -100,9 +101,11 @@ async def _run(args: argparse.Namespace) -> int:
     text = report.render()
     print(text)
     if args.out:
-        with open(args.out, "w", encoding="utf-8") as f:
+        out_path = pathlib.Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
             f.write(text)
-        logger.info("report written", path=args.out)
+        logger.info("report written", path=str(out_path))
     return 0
 
 
