@@ -34,7 +34,7 @@ broken alerts config can never prevent the bot from booting.
 
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from src.utils.logger import get_logger
 
@@ -135,6 +135,37 @@ class Alerter(ABC):
     def recenter(
         self, *, symbol: str, old_mid: float, new_mid: float, drift_pct: float,
     ) -> None: ...
+
+    # -- two-way commands (Phase 11A step 6) ---------------------------
+    # Default no-op so NullAlerter inherits "do nothing"; TelegramAlerter
+    # overrides to capture the callbacks and start its listener task. The
+    # ABC declares this so grid_runner can call it on whatever Alerter the
+    # factory returns without an isinstance dance.
+
+    def set_command_handlers(
+        self,
+        *,
+        status_provider: Optional[Callable[[], dict]] = None,
+        halt_handler: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """
+        Attach the callbacks the live alerter uses to answer /status and
+        /halt from the operator's phone.
+
+          status_provider() -> dict — must return a dict with the kwargs
+                                that `format_status` accepts (env_mode,
+                                open_orders, placed_total, filled_total,
+                                realized_24h_usd, halted, uptime_seconds).
+          halt_handler()    -> None — invoked when /halt arrives. The
+                                expected effect is "kill switch tripped"
+                                — typically by creating runtime/HALT so
+                                the existing risk monitor picks it up.
+
+        NullAlerter ignores both. TelegramAlerter wires its listener task
+        only after handlers are attached, so a TelegramAlerter constructed
+        without handlers behaves as send-only.
+        """
+        return None
 
 
 # ---------------------------------------------------------------------------

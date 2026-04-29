@@ -265,6 +265,44 @@ async def _run(dry_run: bool = False,
                 interval_s=obs_cfg.heartbeat_interval_s,
                 status_path=obs_cfg.status_path)
 
+    # --- Telegram two-way commands (Phase 11A step 6) -----------------
+    # status_provider: closure that snapshots state for the [STATUS] reply.
+    # Reads are race-free enough — counters are simple ints (GIL-safe in
+    # CPython) and risk-side reads use the manager's own lock internally.
+    def _status_provider() -> dict:
+        placed = sum(getattr(e, "_placed", 0) for e in engines.values())
+        filled = sum(getattr(e, "_filled", 0) for e in engines.values())
+        return {
+            "env_mode": env_mode,
+            "open_orders": int(risk.open_order_count),
+            "placed_total": int(placed),
+            "filled_total": int(filled),
+            "realized_24h_usd": float(risk.realized_pnl_24h),
+            "halted": bool(risk.halted),
+            "uptime_seconds": time.time() - started_at,
+        }
+
+    # halt_handler: creates the sentinel file the existing risk monitor
+    # already polls. We deliberately go through the file path rather than
+    # calling risk.trip() directly so the on-disk semantics match a manual
+    # `touch runtime/HALT` — operators can audit what triggered the stop
+    # by checking whether the file exists.
+    def _halt_handler() -> None:
+        path = pathlib.Path(risk_cfg.kill_switch_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
+        logger.warning("remote /halt received via Telegram — sentinel created",
+                       path=str(path))
+
+    alerter.set_command_handlers(
+        status_provider=_status_provider,
+        halt_handler=_halt_handler,
+    )
+    # Idempotent — second call spawns the listener now that handlers are
+    # attached. The first start() (further up) already spawned the sender
+    # so boot/crash alerts work even if init fails before this point.
+    await alerter.start()
+
     # Boot alert — components are wired but tasks haven't started yet. The
     # operator now sees [BOOT] arrive ~immediately, so a startup that hangs
     # in user_stream.run() is detectable from the phone.

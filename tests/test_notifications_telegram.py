@@ -361,3 +361,320 @@ def test_enqueue_drops_silently_when_broken():
     a.boot(env_mode="testnet", symbols=["BTCUSDT"],
            max_open_orders=10, daily_loss_limit_usd=20.0)
     assert a.queue_size == 0
+
+
+# ---------------------------------------------------------------------------
+# Listener (Phase 11A step 6)
+# ---------------------------------------------------------------------------
+#
+# The listener loop polls Telegram's getUpdates and dispatches /status,
+# /halt, /help. Tests use a programmable _http_post that distinguishes
+# `getUpdates` URLs (returns canned update batches) from `sendMessage`
+# URLs (records the reply). The listener offset advances as updates are
+# acked. Polling is paused after one batch so tests don't loop.
+
+
+import json as _json  # noqa: E402  -- intentionally late, listener tests only
+
+
+class _ListenerAlerter(TelegramAlerter):
+    """
+    Subclass that lets a test feed a single batch of Telegram updates and
+    capture every reply the listener tries to send.
+
+    `update_batches` is a list of lists. Each call to getUpdates pops
+    the next batch (formatted as Telegram's `{"ok":true,"result":[...]}`
+    wrapper). When batches run out we return an empty result, then sleep
+    in the test loop until torn down. This avoids the test ever needing
+    to wait on a real long-poll.
+    """
+
+    def __init__(self, *args, update_batches=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._update_batches = list(update_batches or [])
+        self.replies: list[dict] = []
+        self.get_calls = 0
+        # If set, the next sendMessage POST returns this status/body
+        # instead of (200, "ok"). Lets tests simulate reply-send failure.
+        self.reply_response: tuple[int, str] = (200, "ok")
+
+    async def _http_post(self, url, payload, *, timeout_s=None):
+        # Real aiohttp.post always yields control; our fake must too,
+        # otherwise the listener's tight `await _poll_once()` loop starves
+        # the test's polling helper and the test hangs.
+        await asyncio.sleep(0)
+        if "getUpdates" in url:
+            self.get_calls += 1
+            if self._update_batches:
+                batch = self._update_batches.pop(0)
+            else:
+                batch = []
+            body = _json.dumps({"ok": True, "result": batch})
+            return 200, body
+        if "sendMessage" in url:
+            self.replies.append(dict(payload))
+            return self.reply_response
+        return 404, "unexpected url"
+
+
+def _msg(*, update_id: int, chat_id: int, text: str) -> dict:
+    """Build a minimal Telegram update with one message."""
+    return {
+        "update_id": update_id,
+        "message": {
+            "chat": {"id": chat_id},
+            "text": text,
+        },
+    }
+
+
+def _status_provider_stub() -> dict:
+    return {
+        "env_mode": "testnet",
+        "open_orders": 7,
+        "placed_total": 12,
+        "filled_total": 4,
+        "realized_24h_usd": 0.46,
+        "halted": False,
+        "uptime_seconds": 8060.0,  # 2h14m
+    }
+
+
+def test_set_command_handlers_is_noop_on_null_alerter():
+    from src.notifications.alerter import NullAlerter
+    a = NullAlerter()
+    # Must not raise; default impl in ABC returns None.
+    a.set_command_handlers(
+        status_provider=_status_provider_stub,
+        halt_handler=lambda: None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_listener_does_not_start_without_handlers():
+    a = _ListenerAlerter(
+        bot_token="abc:def",
+        allowed_chat_ids=[12345],
+        config={},
+        update_batches=[],
+    )
+    await a.start()
+    try:
+        assert a._listener_task is None
+    finally:
+        await a.stop()
+
+
+@pytest.mark.asyncio
+async def test_listener_handles_status(monkeypatch):
+    halt_called = {"n": 0}
+
+    def _halt():
+        halt_called["n"] += 1
+
+    a = _ListenerAlerter(
+        bot_token="abc:def",
+        allowed_chat_ids=[12345],
+        config={},
+        update_batches=[
+            [_msg(update_id=1, chat_id=12345, text="/status")],
+        ],
+    )
+    a.set_command_handlers(
+        status_provider=_status_provider_stub, halt_handler=_halt,
+    )
+    await a.start()
+    try:
+        await _wait_until(lambda: len(a.replies) >= 1)
+    finally:
+        await a.stop()
+    assert halt_called["n"] == 0
+    assert len(a.replies) == 1
+    reply = a.replies[0]
+    assert reply["chat_id"] == 12345
+    assert reply["text"].startswith("[STATUS]")
+    assert "testnet" in reply["text"]
+    # offset acked one past the last update_id we processed.
+    assert a.listener_offset == 2
+
+
+@pytest.mark.asyncio
+async def test_listener_handles_halt_and_calls_handler():
+    halt_called = {"n": 0}
+
+    def _halt():
+        halt_called["n"] += 1
+
+    a = _ListenerAlerter(
+        bot_token="abc:def",
+        allowed_chat_ids=[12345],
+        config={},
+        update_batches=[
+            [_msg(update_id=42, chat_id=12345, text="/halt")],
+        ],
+    )
+    a.set_command_handlers(
+        status_provider=_status_provider_stub, halt_handler=_halt,
+    )
+    await a.start()
+    try:
+        await _wait_until(lambda: halt_called["n"] >= 1)
+        await _wait_until(lambda: len(a.replies) >= 1)
+    finally:
+        await a.stop()
+    assert halt_called["n"] == 1
+    assert a.replies[0]["text"].startswith("[HALT]")
+    assert a.listener_offset == 43
+
+
+@pytest.mark.asyncio
+async def test_listener_handles_help():
+    a = _ListenerAlerter(
+        bot_token="abc:def",
+        allowed_chat_ids=[12345],
+        config={},
+        update_batches=[
+            [_msg(update_id=5, chat_id=12345, text="/help")],
+        ],
+    )
+    a.set_command_handlers(
+        status_provider=_status_provider_stub, halt_handler=lambda: None,
+    )
+    await a.start()
+    try:
+        await _wait_until(lambda: len(a.replies) >= 1)
+    finally:
+        await a.stop()
+    assert a.replies[0]["text"].startswith("[HELP]")
+
+
+@pytest.mark.asyncio
+async def test_listener_accepts_command_with_bot_username_suffix():
+    a = _ListenerAlerter(
+        bot_token="abc:def",
+        allowed_chat_ids=[12345],
+        config={},
+        update_batches=[
+            [_msg(update_id=1, chat_id=12345, text="/status@MyGridBot")],
+        ],
+    )
+    a.set_command_handlers(
+        status_provider=_status_provider_stub, halt_handler=lambda: None,
+    )
+    await a.start()
+    try:
+        await _wait_until(lambda: len(a.replies) >= 1)
+    finally:
+        await a.stop()
+    assert a.replies[0]["text"].startswith("[STATUS]")
+
+
+@pytest.mark.asyncio
+async def test_listener_silently_ignores_unauthorised_chat():
+    halt_called = {"n": 0}
+    a = _ListenerAlerter(
+        bot_token="abc:def",
+        allowed_chat_ids=[12345],   # 99999 below is NOT allowed
+        config={},
+        update_batches=[
+            [_msg(update_id=1, chat_id=99999, text="/halt")],
+        ],
+    )
+    a.set_command_handlers(
+        status_provider=_status_provider_stub,
+        halt_handler=lambda: halt_called.__setitem__("n", halt_called["n"] + 1),
+    )
+    await a.start()
+    # Wait for the update to be acked; no reply should be sent.
+    try:
+        await _wait_until(lambda: a.listener_offset >= 2)
+        # Give the listener a moment in case it (incorrectly) sends a reply.
+        await asyncio.sleep(0.05)
+    finally:
+        await a.stop()
+    assert halt_called["n"] == 0
+    assert a.replies == []
+
+
+@pytest.mark.asyncio
+async def test_listener_silently_ignores_unknown_command():
+    a = _ListenerAlerter(
+        bot_token="abc:def",
+        allowed_chat_ids=[12345],
+        config={},
+        update_batches=[
+            [_msg(update_id=1, chat_id=12345, text="/unknown")],
+        ],
+    )
+    a.set_command_handlers(
+        status_provider=_status_provider_stub, halt_handler=lambda: None,
+    )
+    await a.start()
+    try:
+        await _wait_until(lambda: a.listener_offset >= 2)
+        await asyncio.sleep(0.05)
+    finally:
+        await a.stop()
+    assert a.replies == []
+
+
+@pytest.mark.asyncio
+async def test_listener_advances_offset_even_on_ignored_messages():
+    # Mixed batch: one allowed /status, one denied chat. Offset must
+    # cover BOTH so we don't redeliver either on the next poll.
+    a = _ListenerAlerter(
+        bot_token="abc:def",
+        allowed_chat_ids=[12345],
+        config={},
+        update_batches=[
+            [
+                _msg(update_id=10, chat_id=99999, text="/halt"),
+                _msg(update_id=11, chat_id=12345, text="/status"),
+            ],
+        ],
+    )
+    a.set_command_handlers(
+        status_provider=_status_provider_stub, halt_handler=lambda: None,
+    )
+    await a.start()
+    try:
+        await _wait_until(lambda: len(a.replies) >= 1)
+    finally:
+        await a.stop()
+    # offset must be one past the LARGEST update_id in the batch.
+    assert a.listener_offset == 12
+
+
+@pytest.mark.asyncio
+async def test_listener_disables_after_too_many_crashes(monkeypatch):
+    # Force _poll_once to always raise. After _LISTENER_MAX_RESTARTS+1
+    # crashes within the window, the listener flips _listener_disabled.
+    monkeypatch.setattr(
+        "src.notifications.telegram._LISTENER_RESTART_DELAY_S", 0.0,
+    )
+
+    crash_count = {"n": 0}
+
+    async def _broken_poll():
+        crash_count["n"] += 1
+        raise RuntimeError("intentional crash for test")
+
+    a = _ListenerAlerter(
+        bot_token="abc:def",
+        allowed_chat_ids=[12345],
+        config={},
+    )
+    a.set_command_handlers(
+        status_provider=_status_provider_stub, halt_handler=lambda: None,
+    )
+    a._poll_once = _broken_poll  # type: ignore[assignment]
+    await a.start()
+    try:
+        await _wait_until(lambda: a.listener_disabled, timeout=3.0)
+    finally:
+        await a.stop()
+    # We get at LEAST max_restarts+1 crashes (the +1 is the one that
+    # tips len(crash_times) past the threshold).
+    from src.notifications.telegram import _LISTENER_MAX_RESTARTS
+    assert crash_count["n"] >= _LISTENER_MAX_RESTARTS + 1
+    assert a.listener_disabled is True
