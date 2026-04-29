@@ -40,7 +40,9 @@ import pathlib
 import threading
 import time
 from dataclasses import dataclass
+from typing import Optional
 
+from src.notifications.alerter import Alerter, NullAlerter
 from src.risk.config import RiskConfig
 from src.utils.logger import get_logger
 
@@ -72,7 +74,7 @@ class RiskManager:
         risk.record_closed(order_id)
     """
 
-    def __init__(self, config: RiskConfig):
+    def __init__(self, config: RiskConfig, alerter: Optional[Alerter] = None):
         self._cfg = config
         # Lock protects every mutable field. on_fill arrives on the WS
         # dispatch task; check_can_place runs on engine tasks. Multiple
@@ -91,6 +93,10 @@ class RiskManager:
         # manager. The runner is expected to flip stop_event and exit.
         self._halted = False
         self._halt_reason: str = ""
+        # Alerter is shared with the rest of the bot; trip() emits a [HALT]
+        # alert. Default NullAlerter keeps existing tests / CLI rehearsals
+        # working with no behaviour change.
+        self._alerter: Alerter = alerter or NullAlerter()
 
     # ------------------------------------------------------------------
     # Halt state
@@ -106,7 +112,18 @@ class RiskManager:
                 return
             self._halted = True
             self._halt_reason = reason
+            # Snapshot for the alert while we still hold the lock — avoids
+            # tearing if another thread reads/writes between unlock and emit.
+            realized_24h = self._realized_pnl_locked()
+            open_count = len(self._open_order_ids)
         logger.error("RISK HALT", reason=reason)
+        # Fire-and-forget; the alerter.halt contract is sync + non-blocking.
+        self._alerter.halt(
+            reason=reason,
+            realized_24h_usd=realized_24h,
+            daily_loss_limit_usd=self._cfg.daily_loss_limit_usd,
+            open_orders=open_count,
+        )
 
     @property
     def halted(self) -> bool:
@@ -189,7 +206,9 @@ class RiskManager:
     # PnL accounting (FIFO)
     # ------------------------------------------------------------------
 
-    def record_fill(self, symbol: str, side: str, price: float, qty: float) -> None:
+    def record_fill(
+        self, symbol: str, side: str, price: float, qty: float
+    ) -> Optional[float]:
         """
         Record a fill against the FIFO inventory book.
 
@@ -200,17 +219,21 @@ class RiskManager:
         Sells that exceed inventory (e.g. pre-existing balance, or if we
         missed observing a buy) consume what's available and discard the
         rest — we don't manufacture phantom buys at $0.
+
+        Returns the realized PnL delta in USD for SELL fills (None for
+        BUY). The engine forwards this to the [FILL] alert so the operator
+        sees direction at a glance without re-running FIFO matching.
         """
         if qty <= 0:
-            return
+            return None
         side_upper = side.upper()
         with self._lock:
             inv = self._inventory[symbol]
             if side_upper == "BUY":
                 inv.append(_Lot(price=price, qty=qty))
-                return
+                return None
             if side_upper != "SELL":
-                return
+                return None
             remaining = qty
             realized_delta = 0.0
             while remaining > 0 and inv:
@@ -236,6 +259,7 @@ class RiskManager:
                             symbol=symbol,
                             realized_delta=round(realized_delta, 6),
                             realized_24h=round(self._realized_pnl_locked(), 6))
+        return realized_delta
 
     @property
     def realized_pnl_24h(self) -> float:

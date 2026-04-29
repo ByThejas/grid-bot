@@ -46,6 +46,7 @@ import asyncio
 import pathlib
 import signal as os_signal
 import sys
+import time
 
 import yaml
 from dotenv import load_dotenv
@@ -63,6 +64,7 @@ from src.exchange.user_data_stream import UserDataStream
 from src.grid.config import GridEngineConfig
 from src.grid.engine import GridEngine
 from src.market_data.storage import MarketDataStore
+from src.notifications.alerter import make_alerter
 from src.observability.heartbeat import HeartbeatMonitor, ObservabilityConfig
 from src.risk.config import RiskConfig
 from src.risk.manager import RiskManager
@@ -118,6 +120,17 @@ async def _run(dry_run: bool = False,
     use_testnet = env_mode == "testnet"
     symbols = [p["symbol"] for p in settings["trading"]["pairs"]]
 
+    # Track session start for the [STOP] alert's uptime field. time.time()
+    # is fine — UTC wall clock is what the operator will reason about.
+    started_at = time.time()
+
+    # Alerter (Phase 11A). Constructed early so any subsequent failure that
+    # raises before we hit `await alerter.start()` still leaves a working
+    # NullAlerter wired into anything we do construct. make_alerter never
+    # raises — broken telegram config returns NullAlerter.
+    alerter = make_alerter(settings)
+    await alerter.start()
+
     logger.info("grid runner starting",
                 symbols=symbols,
                 env_mode=env_mode,
@@ -149,7 +162,7 @@ async def _run(dry_run: bool = False,
     # --- Shared risk manager (one per process, all engines consult it) ---
     # env_mode drives the mainnet-overrides merge inside from_yaml.
     risk_cfg = RiskConfig.from_yaml(settings, env_mode=env_mode)
-    risk = RiskManager(risk_cfg)
+    risk = RiskManager(risk_cfg, alerter=alerter)
     logger.info("risk manager wired",
                 env_mode=env_mode,
                 max_open_orders=risk_cfg.max_open_orders,
@@ -159,7 +172,7 @@ async def _run(dry_run: bool = False,
     # --- Shared liquidity signal (one per process, all engines consult it) ---
     liq_raw = settings.get("signals", {}).get("liquidity", {}) or {}
     liq_cfg = LiquidityConfig.from_dict(liq_raw)
-    liquidity = LiquiditySignal(exchange=exchange, config=liq_cfg)
+    liquidity = LiquiditySignal(exchange=exchange, config=liq_cfg, alerter=alerter)
     logger.info("liquidity signal wired",
                 pause_spread_bps=liq_cfg.pause_spread_bps,
                 min_spacing_to_spread_ratio=liq_cfg.min_spacing_to_spread_ratio,
@@ -175,7 +188,9 @@ async def _run(dry_run: bool = False,
         pause_threshold=signals_raw.get("sentiment_pause_threshold"),
     )
     sentiment_source = FileSentimentSource(sent_cfg.sentiment_path)
-    sentiment = SentimentSignal(source=sentiment_source, config=sent_cfg)
+    sentiment = SentimentSignal(
+        source=sentiment_source, config=sent_cfg, alerter=alerter,
+    )
     logger.info("sentiment signal wired",
                 pause_threshold=sent_cfg.pause_threshold,
                 sentiment_path=sent_cfg.sentiment_path,
@@ -188,6 +203,7 @@ async def _run(dry_run: bool = False,
         engines[symbol] = GridEngine(
             exchange=exchange, config=cfg, signal=signal,
             risk=risk, liquidity=liquidity, sentiment=sentiment,
+            alerter=alerter,
         )
 
     # --- User data stream dispatcher: fan events out to all engines ---
@@ -243,10 +259,59 @@ async def _run(dry_run: bool = False,
     obs_cfg = ObservabilityConfig.from_yaml(settings)
     heartbeat = HeartbeatMonitor(
         engines=engines, risk=risk, env_mode=env_mode, config=obs_cfg,
+        alerter=alerter,
     )
     logger.info("heartbeat wired",
                 interval_s=obs_cfg.heartbeat_interval_s,
                 status_path=obs_cfg.status_path)
+
+    # --- Telegram two-way commands (Phase 11A step 6) -----------------
+    # status_provider: closure that snapshots state for the [STATUS] reply.
+    # Reads are race-free enough — counters are simple ints (GIL-safe in
+    # CPython) and risk-side reads use the manager's own lock internally.
+    def _status_provider() -> dict:
+        placed = sum(getattr(e, "_placed", 0) for e in engines.values())
+        filled = sum(getattr(e, "_filled", 0) for e in engines.values())
+        return {
+            "env_mode": env_mode,
+            "open_orders": int(risk.open_order_count),
+            "placed_total": int(placed),
+            "filled_total": int(filled),
+            "realized_24h_usd": float(risk.realized_pnl_24h),
+            "halted": bool(risk.halted),
+            "uptime_seconds": time.time() - started_at,
+        }
+
+    # halt_handler: creates the sentinel file the existing risk monitor
+    # already polls. We deliberately go through the file path rather than
+    # calling risk.trip() directly so the on-disk semantics match a manual
+    # `touch runtime/HALT` — operators can audit what triggered the stop
+    # by checking whether the file exists.
+    def _halt_handler() -> None:
+        path = pathlib.Path(risk_cfg.kill_switch_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
+        logger.warning("remote /halt received via Telegram — sentinel created",
+                       path=str(path))
+
+    alerter.set_command_handlers(
+        status_provider=_status_provider,
+        halt_handler=_halt_handler,
+    )
+    # Idempotent — second call spawns the listener now that handlers are
+    # attached. The first start() (further up) already spawned the sender
+    # so boot/crash alerts work even if init fails before this point.
+    await alerter.start()
+
+    # Boot alert — components are wired but tasks haven't started yet. The
+    # operator now sees [BOOT] arrive ~immediately, so a startup that hangs
+    # in user_stream.run() is detectable from the phone.
+    alerter.boot(
+        env_mode=env_mode,
+        symbols=symbols,
+        max_open_orders=risk_cfg.max_open_orders,
+        daily_loss_limit_usd=risk_cfg.daily_loss_limit_usd,
+    )
 
     # --- Run stream + engines concurrently ---
     tasks = [asyncio.create_task(user_stream.run(stop_event), name="user_data_stream"),
@@ -267,13 +332,37 @@ async def _run(dry_run: bool = False,
         if pending:
             await asyncio.wait(pending, timeout=30.0)
     finally:
-        # Surface any exception from completed tasks.
+        # Surface any exception from completed tasks. Each task crash fires
+        # a [CRASH] alert so the operator hears about it even before the
+        # [STOP] alert lands a few lines later.
         for t in tasks:
             if t.done() and not t.cancelled():
                 exc = t.exception()
                 if exc:
                     logger.error("task finished with error",
                                  task=t.get_name(), error=str(exc))
+                    try:
+                        alerter.crash(component=t.get_name(), exc=exc)
+                    except Exception:
+                        # Alerter must never block shutdown — but defensively
+                        # swallow anything it raises in this path.
+                        pass
+
+        # Shutdown alert BEFORE we tear down clients — the alert summarises
+        # the session and reads from RiskManager state, which is still live
+        # at this point. alerter.stop() drains the sender queue afterwards.
+        try:
+            alerter.shutdown(
+                final_open_orders=risk.open_order_count,
+                session_realized_usd=risk.realized_pnl_24h,
+                uptime_seconds=time.time() - started_at,
+            )
+        except Exception:
+            pass
+        try:
+            await alerter.stop()
+        except Exception:
+            pass
 
         # Close clients + storage.
         try:

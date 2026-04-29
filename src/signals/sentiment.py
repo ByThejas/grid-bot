@@ -46,6 +46,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 
+from src.notifications.alerter import Alerter, NullAlerter
 from src.utils.logger import get_logger
 
 logger = get_logger("sentiment")
@@ -252,9 +253,15 @@ class SentimentSignal:
     would add complexity for no real benefit at v1.
     """
 
-    def __init__(self, source: SentimentSource, config: SentimentConfig):
+    def __init__(
+        self,
+        source: SentimentSource,
+        config: SentimentConfig,
+        alerter: Optional[Alerter] = None,
+    ):
         self._source = source
         self._config = config
+        self._alerter: Alerter = alerter or NullAlerter()
         # Track last reported state to suppress repetitive "neutral" logs.
         # Operationally important — without this, every grid placement
         # would emit a sentiment log line, drowning real signal.
@@ -275,12 +282,32 @@ class SentimentSignal:
 
         # Log on every state transition (pause-state change or score change
         # for non-neutral readings). Quiet on steady neutral.
-        if state.should_pause != self._last_logged_pause or state.source != "neutral":
+        prev = self._last_logged_pause
+        if state.should_pause != prev or state.source != "neutral":
             logger.info("sentiment",
                         score=round(state.score, 3),
                         source=state.source,
                         should_pause=state.should_pause,
                         reason=state.reason)
             self._last_logged_pause = state.should_pause
+
+        # Edge-trigger pause/resume alerts on transition. Sentiment is
+        # market-wide (BTC news moves ETH); we pass symbol="*" so the
+        # operator can tell the alert apart from a per-symbol liquidity one.
+        # First reading is seeded silently (prev is None) so a routine boot
+        # doesn't fire a [RESUME].
+        if prev is not None and state.should_pause != prev:
+            score_str = f"{state.score:+.2f}"
+            threshold_str = f"{self._config.pause_threshold:+.2f}"
+            if state.should_pause:
+                self._alerter.pause(
+                    source="sentiment", symbol="*",
+                    score=score_str, threshold=threshold_str,
+                    reason=state.reason or "negative",
+                )
+            else:
+                self._alerter.resume(
+                    source="sentiment", symbol="*", score=score_str,
+                )
 
         return state

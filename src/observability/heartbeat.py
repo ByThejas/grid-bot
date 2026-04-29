@@ -45,6 +45,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from src.notifications.alerter import Alerter, NullAlerter
 from src.risk.manager import RiskManager
 from src.utils.logger import get_logger
 
@@ -217,12 +218,14 @@ class HeartbeatMonitor:
         risk: Optional[RiskManager],
         env_mode: str,
         config: ObservabilityConfig,
+        alerter: Optional[Alerter] = None,
         now_fn=time.time,
     ):
         self._engines = engines
         self._risk = risk
         self._env_mode = env_mode
         self._cfg = config
+        self._alerter: Alerter = alerter or NullAlerter()
         self._now = now_fn
 
         self._started_at: float = self._now()
@@ -346,6 +349,23 @@ class HeartbeatMonitor:
             per_symbol=delta,
             realized_pnl_24h=risk.get("realized_pnl_24h"),
             open_orders=risk.get("open_order_count"),
+        )
+        # Alert mirrors the log line. Aggregates are summed across symbols;
+        # halts is 1/0 because daily HALTs already get their own [HALT] alert
+        # — this field is just a "did anything bad happen yesterday" hint.
+        # Uptime is clamped to 86_400 because a daily summary covers at most
+        # one UTC day even if the process has been running longer.
+        fills_total = sum(d.get("filled_total", 0) for d in delta.values())
+        recenters_total = sum(d.get("recentered_total", 0) for d in delta.values())
+        halts_today = 1 if risk.get("halted") else 0
+        uptime = float(snapshot.get("uptime_seconds", 0.0))
+        self._alerter.daily_summary(
+            utc_day=self._day_start_utc,
+            fills=fills_total,
+            realized_usd=float(risk.get("realized_pnl_24h") or 0.0),
+            recenters=recenters_total,
+            halts=halts_today,
+            uptime_seconds=min(uptime, 86_400.0),
         )
         self._day_start_snapshot = snapshot["per_symbol"]
         self._day_start_utc = current_day

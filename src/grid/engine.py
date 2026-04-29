@@ -54,6 +54,7 @@ from src.exchange.filters import SymbolFilter, meets_min_notional, round_to_step
 from src.grid.config import GridEngineConfig
 from src.grid.levels import GridParams, compute_grid
 from src.grid.state import GridState
+from src.notifications.alerter import Alerter, NullAlerter
 from src.risk.manager import RiskManager
 from src.signals.base import Signal
 from src.signals.liquidity import LiquiditySignal
@@ -86,6 +87,7 @@ class GridEngine:
         risk: Optional[RiskManager] = None,
         liquidity: Optional[LiquiditySignal] = None,
         sentiment: Optional[SentimentSignal] = None,
+        alerter: Optional[Alerter] = None,
     ):
         self._exchange = exchange
         self._config = config
@@ -104,6 +106,9 @@ class GridEngine:
         # Operator can use the kill switch (RiskManager halt) to stop
         # everything including replacements.
         self._sentiment = sentiment
+        # Alerter is shared across engines (Phase 11A). NullAlerter is the
+        # default so test fixtures and dry-run runs work unchanged.
+        self._alerter: Alerter = alerter or NullAlerter()
         self._state = GridState()
         self._filters: Optional[SymbolFilter] = None
         # The spacing the active grid was placed with. Updated each time
@@ -370,19 +375,32 @@ class GridEngine:
             return
 
         self._filled += 1
+        # Use Binance's executed price (`L`) and qty (`l`) when present
+        # — these are the actual trade prints. Fall back to our tracked
+        # values if the event is missing them (shouldn't happen).
+        fill_price = float(event.get("L", original.price) or original.price)
+        fill_qty = float(event.get("l", original.size) or original.size)
+        realized_delta: Optional[float] = None
         if self._risk is not None:
-            # Use Binance's executed price (`L`) and qty (`l`) when present
-            # — these are the actual trade prints. Fall back to our tracked
-            # values if the event is missing them (shouldn't happen).
-            fill_price = float(event.get("L", original.price) or original.price)
-            fill_qty = float(event.get("l", original.size) or original.size)
             self._risk.record_closed(order_id)
-            self._risk.record_fill(self._config.symbol, original.side, fill_price, fill_qty)
+            realized_delta = self._risk.record_fill(
+                self._config.symbol, original.side, fill_price, fill_qty,
+            )
         logger.info("fill",
                     order_id=order_id,
                     side=original.side,
                     price=original.price,
                     size=original.size)
+        # Fire the [FILL] alert. realized_delta is None for BUY by FIFO
+        # contract; format_fill drops the field so BUY messages don't carry
+        # a misleading "+$0.00" realized.
+        self._alerter.fill(
+            symbol=self._config.symbol,
+            side=original.side,
+            price=fill_price,
+            qty=fill_qty,
+            realized_delta_usd=realized_delta,
+        )
 
         # Replacement: mirror across grid center-spacing.
         # We use the ACTIVE spacing (liquidity-adapted at last placement)
@@ -436,6 +454,9 @@ class GridEngine:
                     logger.error("recenter failed", error=str(e))
 
     async def _recenter(self, new_center: float) -> None:
+        # Capture the OLD center before mutation so the [RECENTER] alert
+        # has both endpoints — drift_pct is meaningless without them.
+        old_center = self._state.center_price
         # Snapshot ids BEFORE clearing — we need to release them from the
         # risk ledger immediately so the new grid doesn't hit the open-
         # orders cap waiting for CANCELED events to drift in over the WS.
@@ -449,6 +470,20 @@ class GridEngine:
         zones = await self._compute_zones_safely()
         await self._place_grid(new_center, zones)
         self._recentered += 1
+        # Alert AFTER placement — a recenter that paused at _place_grid (e.g.
+        # liquidity widened past threshold) still bumped the counter, so the
+        # operator should hear about it. drift_pct is computed against the
+        # old center so it stays positive regardless of direction.
+        drift_pct = (
+            abs(new_center - old_center) / old_center * 100.0
+            if old_center > 0 else 0.0
+        )
+        self._alerter.recenter(
+            symbol=self._config.symbol,
+            old_mid=old_center,
+            new_mid=new_center,
+            drift_pct=drift_pct,
+        )
 
     # ------------------------------------------------------------------
     # Shutdown
