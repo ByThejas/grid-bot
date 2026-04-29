@@ -10,8 +10,12 @@ Focus:
     seeds the day-start snapshot.
   - DAILY SUMMARY fires on UTC day rollover, not on same-day heartbeats.
   - _diff_counters is straight subtraction per field.
+  - run() emits a settling beat shortly after start so STATUS.json
+    reflects post-init engine state instead of zero counters
+    (regression for 2026-04-29 mainnet bug).
 """
 
+import asyncio
 import json
 import os
 import pathlib
@@ -20,6 +24,8 @@ import sys
 import tempfile
 import traceback
 from dataclasses import dataclass, field
+
+import pytest
 
 from src.observability.heartbeat import (
     HeartbeatMonitor,
@@ -295,6 +301,90 @@ def test_config_reads_yaml_overrides():
     assert c.heartbeat_interval_s == 60.0
     assert c.status_path == "custom/path.json"
     assert c.enable_daily_summary is False
+
+
+# ---------------------------------------------------------------------------
+# run() — settling beat regression
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_emits_settling_beat_after_initial(tmp_path):
+    """
+    Regression for the 2026-04-29 mainnet canary bug: STATUS.json was
+    written immediately at task start with zero counters and stuck for
+    a full heartbeat_interval_s. The settling beat re-emits ~half-an-
+    interval (capped at 15s) later, so external watchers see the
+    post-init state without waiting the full 5min default interval.
+
+    With interval=0.4s, settling delay = min(15, 0.2) = 0.2s. We mutate
+    the engine's _placed counter between the initial and settling beats
+    and assert STATUS.json picks up the new value.
+    """
+    status_path = str(tmp_path / "STATUS.json")
+    eng = _FakeEngine()
+    cfg = ObservabilityConfig(
+        heartbeat_interval_s=0.4, status_path=status_path,
+    )
+    mon = HeartbeatMonitor(
+        engines={"BTCUSDT": eng}, risk=None,
+        env_mode="testnet", config=cfg,
+    )
+    stop = asyncio.Event()
+
+    async def driver():
+        # Wait a hair so the initial beat (which sees placed=0) lands first.
+        await asyncio.sleep(0.05)
+        # Simulate engines placing their initial grid right after boot.
+        eng._placed = 4
+        eng._filled = 0
+        # Wait long enough for the settling beat (at ~0.2s) to fire.
+        await asyncio.sleep(0.3)
+        stop.set()
+
+    runner_task = asyncio.create_task(mon.run(stop))
+    driver_task = asyncio.create_task(driver())
+    await asyncio.gather(runner_task, driver_task)
+
+    # The last write to STATUS.json was the settling beat after eng._placed
+    # was bumped to 4. Without the fix, the file would still show 0.
+    with open(status_path) as f:
+        snap = json.load(f)
+    assert snap["per_symbol"]["BTCUSDT"]["placed_total"] == 4
+
+
+@pytest.mark.asyncio
+async def test_run_exits_cleanly_if_stopped_during_settling(tmp_path):
+    """
+    If stop_event fires during the settling delay, run() must exit
+    cleanly without firing the settling beat (no half-init STATUS write
+    on shutdown). The initial beat still landed before this path.
+    """
+    status_path = str(tmp_path / "STATUS.json")
+    eng = _FakeEngine()
+    cfg = ObservabilityConfig(
+        heartbeat_interval_s=2.0, status_path=status_path,
+    )
+    # settling delay = min(15, 1.0) = 1.0s
+    mon = HeartbeatMonitor(
+        engines={"BTCUSDT": eng}, risk=None,
+        env_mode="testnet", config=cfg,
+    )
+    stop = asyncio.Event()
+
+    # Stop during the settling window (before the 1.0s settling timer fires).
+    async def stop_quickly():
+        await asyncio.sleep(0.05)
+        stop.set()
+
+    runner_task = asyncio.create_task(mon.run(stop))
+    stopper_task = asyncio.create_task(stop_quickly())
+    # If run() doesn't exit quickly, this will time out with
+    # asyncio.TimeoutError surfaced by the test framework.
+    await asyncio.wait_for(asyncio.gather(runner_task, stopper_task), timeout=2.0)
+
+    # Initial beat ran and wrote STATUS.json before settling delay.
+    assert os.path.exists(status_path)
 
 
 # ---------------------------------------------------------------------------

@@ -383,8 +383,11 @@ def main() -> None:
                 log_path=cfg["log_path"],
                 halt_path=cfg["halt_path"])
     app = build_app(cfg)
+    # Keep aiohttp's default `Running on http://...` banner — it's the
+    # operator's signal that the bind succeeded. access_log stays off so
+    # we don't drown the terminal in one INFO line per page refresh.
     web.run_app(app, host=cfg["host"], port=int(cfg["port"]),
-                access_log=None, print=lambda *a, **kw: None)
+                access_log=None)
 
 
 if __name__ == "__main__":

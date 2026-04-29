@@ -242,7 +242,18 @@ class HeartbeatMonitor:
     async def run(self, stop_event: asyncio.Event) -> None:
         """
         Loop until stop_event. Emits the first heartbeat immediately so
-        STATUS.json exists before anyone looks for it.
+        STATUS.json exists before anyone looks for it, then a SETTLING
+        beat after a short delay so the file reflects post-init engine
+        state instead of zero counters.
+
+        Why the settling beat: the heartbeat task and the engine tasks
+        both start from the same asyncio.wait pool. The first beat_once()
+        runs before any engine has called _place_grid, so per_symbol
+        counters are 0. Without the settling beat, the dashboard /
+        external watchers see "0 placed" until the next regular interval
+        fires — up to 5 minutes by default. Found during the 2026-04-29
+        mainnet canary launch when the dashboard sat on 0/0 even though
+        8 orders were live on the exchange.
         """
         logger.info("heartbeat started",
                     interval_s=self._cfg.heartbeat_interval_s,
@@ -251,6 +262,21 @@ class HeartbeatMonitor:
 
         # Initial heartbeat primes the day-start snapshot and writes STATUS.json.
         self.beat_once()
+
+        # Settling beat: re-emit after a short delay so STATUS.json
+        # captures the freshly-placed initial grids. Capped at half the
+        # configured interval so very-low intervals (e.g. tests) don't
+        # let the settling delay dominate.
+        settling_delay = min(15.0, max(0.0, self._cfg.heartbeat_interval_s / 2.0))
+        if settling_delay > 0:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=settling_delay)
+                # stop_event fired during settling — exit cleanly without
+                # a redundant beat.
+                logger.info("heartbeat stopping")
+                return
+            except asyncio.TimeoutError:
+                self.beat_once()
 
         while not stop_event.is_set():
             try:
