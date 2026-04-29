@@ -169,6 +169,38 @@ observability:
   # the day just ended). Set to false only for noisy debugging.
   enable_daily_summary: true
 
+# --- Notifications (Phase 11A) ---
+# Telegram alerts + remote /halt control. Disabled by default — flip
+# `enabled: true` AFTER you have set TELEGRAM_BOT_TOKEN and
+# TELEGRAM_ALLOWED_CHAT_IDS in .env. The factory always returns a working
+# alerter (NullAlerter when disabled), so a missing or broken telegram
+# config never prevents the bot from booting.
+telegram:
+  # Master switch. false → NullAlerter, no network code runs.
+  enabled: false
+  # Per-call HTTP timeout for sendMessage. 5s is plenty for Telegram's API
+  # in normal conditions; the sender retries on timeout anyway.
+  send_timeout_seconds: 5
+  # Bounded outbound queue. On overflow we drop OLDEST and prefix the next
+  # successful send with "(N alerts dropped due to queue overflow)" so the
+  # operator knows they missed something. 100 covers a multi-hour outage
+  # of typical alert volume.
+  max_queue_size: 100
+  # Per-event toggles. Mirrors the design doc Section 3 taxonomy.
+  # Heartbeat alerts are 288/day — too noisy for a phone, and STATUS.json
+  # already covers liveness. Recenter alerts are routine; visible in logs.
+  alert_on:
+    boot: true
+    shutdown: true
+    crash: true
+    fill: true
+    halt: true
+    pause: true
+    resume: true
+    heartbeat: false
+    daily_summary: true
+    recenter: false
+
 # --- Logging ---
 logging:
   level: INFO                   # DEBUG in dev, INFO in prod
