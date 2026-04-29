@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.exchange.base import ExchangeBase, OrderBook
+from src.notifications.alerter import Alerter, NullAlerter
 from src.utils.logger import get_logger
 
 logger = get_logger("liquidity")
@@ -218,9 +219,19 @@ class LiquiditySignal:
     risk (stale signal) for negligible gain.
     """
 
-    def __init__(self, exchange: ExchangeBase, config: LiquidityConfig):
+    def __init__(
+        self,
+        exchange: ExchangeBase,
+        config: LiquidityConfig,
+        alerter: Optional[Alerter] = None,
+    ):
         self._exchange = exchange
         self._config = config
+        self._alerter: Alerter = alerter or NullAlerter()
+        # Per-symbol pause state, used to fire [PAUSE]/[RESUME] alerts only
+        # on the transition. Without this we'd spam the operator on every
+        # placement attempt during a sustained wide-spread regime.
+        self._last_pause_per_symbol: dict[str, bool] = {}
 
     async def compute(
         self,
@@ -243,4 +254,23 @@ class LiquiditySignal:
                     imbalance=round(state.imbalance, 3),
                     recommended_spacing_pct=round(state.recommended_spacing_pct, 4),
                     should_pause=state.should_pause)
+        # Edge-trigger alerts on pause-state transition.
+        prev = self._last_pause_per_symbol.get(symbol)
+        if prev is None:
+            # First reading for this symbol — seed without alerting; we don't
+            # want a [RESUME] on bot boot just because we initialised to False.
+            self._last_pause_per_symbol[symbol] = state.should_pause
+        elif state.should_pause != prev:
+            spread_str = f"{state.spread_bps:.1f}bps"
+            threshold_str = f"{self._config.pause_spread_bps:.1f}bps"
+            if state.should_pause:
+                self._alerter.pause(
+                    source="liquidity", symbol=symbol,
+                    spread=spread_str, threshold=threshold_str,
+                )
+            else:
+                self._alerter.resume(
+                    source="liquidity", symbol=symbol, spread=spread_str,
+                )
+            self._last_pause_per_symbol[symbol] = state.should_pause
         return state
