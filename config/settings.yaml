@@ -177,7 +177,7 @@ observability:
 # config never prevents the bot from booting.
 telegram:
   # Master switch. false → NullAlerter, no network code runs.
-  enabled: false
+  enabled: true
   # Per-call HTTP timeout for sendMessage. 5s is plenty for Telegram's API
   # in normal conditions; the sender retries on timeout anyway.
   send_timeout_seconds: 5
