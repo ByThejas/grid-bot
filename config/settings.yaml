@@ -169,6 +169,31 @@ observability:
   # the day just ended). Set to false only for noisy debugging.
   enable_daily_summary: true
 
+# --- Dashboard (Phase 11B) ---
+# Tiny local HTML status page + halt button. Run as a SECOND process
+# alongside the bot:
+#     python -m src.dashboard.server
+# It reads STATUS.json (written by the heartbeat task) and the log file,
+# and the HALT button creates runtime/HALT — same path as a manual touch
+# or Telegram /halt.
+dashboard:
+  # 127.0.0.1 only by default. Anyone on your laptop can hit it; nobody
+  # on the LAN can. Cloud migration (Phase 11C) will revisit this with
+  # a proper auth + firewall layer.
+  host: 127.0.0.1
+  port: 8080
+  # How many tail lines to render in the page. 50 fits on a laptop screen
+  # without scrolling much; bump to 200 if you're investigating an incident.
+  log_lines: 50
+  # Auto-refresh interval (seconds) for the HTML page. The JSON endpoint
+  # ignores this — clients poll on their own schedule.
+  refresh_seconds: 5
+  # Mark the snapshot as "stale" if STATUS.json hasn't been written in
+  # this many seconds. 660s = 11min = 2× the 300s heartbeat interval +
+  # headroom. The page surfaces the state in yellow; the bot may be
+  # alive but stuck.
+  stale_after_s: 660.0
+
 # --- Notifications (Phase 11A) ---
 # Telegram alerts + remote /halt control. Disabled by default — flip
 # `enabled: true` AFTER you have set TELEGRAM_BOT_TOKEN and
