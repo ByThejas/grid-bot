@@ -213,23 +213,53 @@ class TelegramAlerter(Alerter):
                     queue_max=self._queue.maxsize,
                     listener=self._listener_task is not None)
 
-    async def stop(self) -> None:
+    async def stop(self, drain_timeout_s: float = 5.0) -> None:
         """
-        Idempotent. Cancels both background tasks and closes the session.
-        Pending alerts and unread updates are dropped — Telegram alerts
-        are transient by design.
+        Idempotent. Drains pending alerts (up to drain_timeout_s seconds),
+        cancels background tasks, then closes the session.
+
+        Why drain matters: the runner's finally block calls alerter.shutdown
+        and alerter.halt right before stop(). Without a drain, those final
+        alerts are cancelled mid-send and never reach the operator's phone.
+        Found in the live testnet smoke test on 2026-04-29.
+
+        The listener is cancelled immediately — any pending command reply
+        was already sent direct (bypasses queue), so there's nothing in
+        flight worth waiting for.
         """
-        for task_attr in ("_sender_task", "_listener_task"):
-            task = getattr(self, task_attr, None)
-            if task is not None and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    # Either cancelled cleanly or raised on the way out —
-                    # nothing more we can do here.
-                    pass
-            setattr(self, task_attr, None)
+        # Cancel listener first — its long-poll has nothing the user is
+        # waiting for, and cancelling it frees the event loop to drain
+        # the sender queue faster.
+        if self._listener_task is not None and not self._listener_task.done():
+            self._listener_task.cancel()
+            try:
+                await self._listener_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._listener_task = None
+
+        # Drain the sender. queue.join() blocks until task_done() has
+        # been called for every put — both the sender's own acks and
+        # _enqueue's eviction acks. Bounded by drain_timeout_s so a dead
+        # network can't hang process shutdown.
+        if self._sender_task is not None and not self._sender_task.done():
+            try:
+                await asyncio.wait_for(
+                    self._queue.join(), timeout=drain_timeout_s,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "telegram sender drain timed out — pending alerts will be lost",
+                    remaining=self._queue.qsize(),
+                    timeout_s=drain_timeout_s,
+                )
+            self._sender_task.cancel()
+            try:
+                await self._sender_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._sender_task = None
+
         if self._session is not None:
             try:
                 await self._session.close()
@@ -316,6 +346,10 @@ class TelegramAlerter(Alerter):
 
         If the queue is full, we drop the OLDEST message and enqueue the
         new one. See module docstring for the freshness-vs-ordering choice.
+
+        Every put has a matching task_done() somewhere — either when the
+        sender finishes processing it, or here in the eviction path. Without
+        that pairing, queue.join() (used by stop() to drain) hangs forever.
         """
         if self._broken:
             return
@@ -324,9 +358,11 @@ class TelegramAlerter(Alerter):
             return
         except asyncio.QueueFull:
             pass
-        # Evict oldest, then push.
+        # Evict oldest, then push. Mark the evicted message done so the
+        # unfinished-tasks counter stays balanced.
         try:
             self._queue.get_nowait()
+            self._queue.task_done()
             self._dropped_count += 1
         except asyncio.QueueEmpty:
             # Race: queue went from full to empty between put_nowait and
@@ -349,37 +385,47 @@ class TelegramAlerter(Alerter):
         Drain the queue. One outstanding message at a time so retries
         don't starve fresher alerts (a stuck send only blocks itself, not
         the queue).
+
+        Every successful queue.get() has a paired task_done() in the
+        finally block so stop()'s queue.join() drain can complete. If
+        cancellation arrives mid-send, we still ack the message — the
+        intent of join() is "is the sender caught up?", not "did every
+        message get through?".
         """
         while True:
             try:
                 message = await self._queue.get()
             except asyncio.CancelledError:
                 return
-
-            if self._broken:
-                # Don't bother — we already know this won't go through.
-                continue
-
-            # Prepend a one-shot dropped-count notice so the operator knows
-            # they missed alerts. Reset BEFORE the send so a retry doesn't
-            # double-prepend.
-            if self._dropped_count > 0:
-                message = (
-                    f"({self._dropped_count} alerts dropped due to "
-                    f"queue overflow)\n{message}"
-                )
-                self._dropped_count = 0
-
             try:
-                await self._send_with_retry(message)
-            except asyncio.CancelledError:
-                return
-            except Exception as e:
-                # Defensive: _send_with_retry is supposed to swallow
-                # everything, but we never want sender_loop to die from a
-                # send. Log and keep going so subsequent alerts aren't lost.
-                logger.error("sender loop unexpected error",
-                             error=str(e), error_type=type(e).__name__)
+                if self._broken:
+                    # Don't bother — we already know this won't go through.
+                    continue
+
+                # Prepend a one-shot dropped-count notice so the operator
+                # knows they missed alerts. Reset BEFORE the send so a
+                # retry doesn't double-prepend.
+                if self._dropped_count > 0:
+                    message = (
+                        f"({self._dropped_count} alerts dropped due to "
+                        f"queue overflow)\n{message}"
+                    )
+                    self._dropped_count = 0
+
+                try:
+                    await self._send_with_retry(message)
+                except asyncio.CancelledError:
+                    return
+                except Exception as e:
+                    # Defensive: _send_with_retry is supposed to swallow
+                    # everything, but we never want sender_loop to die from
+                    # a send. Log and keep going.
+                    logger.error("sender loop unexpected error",
+                                 error=str(e), error_type=type(e).__name__)
+            finally:
+                # Always ack the message — even on cancellation or unhandled
+                # exception. Without this, queue.join() in stop() can hang.
+                self._queue.task_done()
 
     # ------------------------------------------------------------------
     # HTTP — split out so tests can override _http_post without aiohttp
@@ -458,10 +504,13 @@ class TelegramAlerter(Alerter):
                 logger.warning("telegram send giving up after retries",
                                attempts=attempt)
                 return
-            try:
-                await asyncio.sleep(min(delay, _RETRY_MAX_DELAY_S))
-            except asyncio.CancelledError:
-                return
+            # No CancelledError handler here on purpose: if stop() cancels
+            # the sender mid-backoff, we want the cancellation to propagate
+            # all the way up to _sender_loop's `except CancelledError` so
+            # the task actually terminates. Catching and converting to a
+            # normal return swallowed the signal — found in 2026-04-29
+            # smoke test debugging.
+            await asyncio.sleep(min(delay, _RETRY_MAX_DELAY_S))
             delay *= 2
 
     # ------------------------------------------------------------------

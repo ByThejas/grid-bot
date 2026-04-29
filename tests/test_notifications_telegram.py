@@ -363,6 +363,99 @@ def test_enqueue_drops_silently_when_broken():
     assert a.queue_size == 0
 
 
+@pytest.mark.asyncio
+async def test_stop_drains_pending_messages_before_cancelling_sender():
+    """
+    Regression: in the 2026-04-29 testnet smoke test, the [HALT] alert
+    fired by RiskManager.trip() and the [STOP] alert fired by the runner's
+    finally block never arrived on Telegram because stop() cancelled the
+    sender task immediately, killing in-flight HTTP requests. stop() must
+    drain the queue first.
+
+    Setup: enqueue 3 messages with a fake _http_post that takes ~50ms each
+    (simulates real-world Telegram RTT). Without the drain fix, stop() is
+    called milliseconds after enqueue and cancels the sender before any
+    of them ship — len(posts) would be 0 or 1. With the drain, all 3 land.
+    """
+    a = _RecordingAlerter(
+        bot_token="abc:def",
+        allowed_chat_ids=[12345],
+        config={},
+        responses=[(200, "ok")],
+    )
+    # Replace _http_post with a slow version that mimics network RTT.
+    async def slow_post(url, payload, *, timeout_s=None):
+        await asyncio.sleep(0.05)
+        a.posts.append((url, dict(payload)))
+        return 200, "ok"
+    a._http_post = slow_post  # type: ignore[assignment]
+    await a.start()
+    a.boot(env_mode="testnet", symbols=["BTCUSDT"],
+           max_open_orders=10, daily_loss_limit_usd=20.0)
+    a.halt(reason="kill switch tripped")
+    a.shutdown(final_open_orders=0, session_realized_usd=0.0,
+               uptime_seconds=10.0)
+    # Three messages queued; stop() should drain all three before cancel.
+    await a.stop()
+    assert len(a.posts) == 3
+    # Sanity: tags appear in enqueue order.
+    tags = [p[1]["text"].split()[0] for p in a.posts]
+    assert tags == ["[BOOT]", "[HALT]", "[STOP]"]
+
+
+@pytest.mark.asyncio
+async def test_stop_drain_timeout_does_not_hang_on_dead_network(monkeypatch):
+    """
+    If Telegram is unreachable, stop() must not hang forever — the drain
+    is bounded by drain_timeout_s. We pass a tiny timeout so the test
+    finishes fast without making the real timeout shorter than 5s.
+    """
+    a = _RecordingAlerter(
+        bot_token="abc:def",
+        allowed_chat_ids=[12345],
+        config={},
+        responses=[(503, "busy")],
+    )
+    monkeypatch.setattr(
+        "src.notifications.telegram._RETRY_INITIAL_DELAY_S", 10.0,
+    )
+    await a.start()
+    a.boot(env_mode="testnet", symbols=["BTCUSDT"],
+           max_open_orders=10, daily_loss_limit_usd=20.0)
+    # Sender will be stuck retrying behind a 10s sleep; drain should bail
+    # out at 0.2s. The exact post count is implementation-dependent (0 or 1
+    # attempt before the first sleep); what matters is stop() returns fast.
+    deadline = asyncio.get_event_loop().time() + 2.0
+    await a.stop(drain_timeout_s=0.2)
+    assert asyncio.get_event_loop().time() < deadline
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_evicted_messages_too():
+    """
+    Eviction calls task_done() on the dropped message — without it,
+    queue.join() would hang forever waiting for an unfinished task that
+    no one is going to finish.
+    """
+    a = _RecordingAlerter(
+        bot_token="abc:def",
+        allowed_chat_ids=[12345],
+        config={"max_queue_size": 1},
+        responses=[(200, "ok")],
+    )
+    # Three enqueues into a max=1 queue forces 2 evictions.
+    a.boot(env_mode="testnet", symbols=["BTCUSDT"],
+           max_open_orders=10, daily_loss_limit_usd=20.0)
+    a.halt(reason="first")
+    a.halt(reason="second")
+    assert a.dropped_count == 2
+    await a.start()
+    # If task_done() weren't called on evicted messages, this would hang.
+    await a.stop(drain_timeout_s=2.0)
+    assert len(a.posts) == 1   # only the surviving message ships
+    assert a.posts[0][1]["text"].startswith("(2 alerts dropped")
+
+
 # ---------------------------------------------------------------------------
 # Listener (Phase 11A step 6)
 # ---------------------------------------------------------------------------
