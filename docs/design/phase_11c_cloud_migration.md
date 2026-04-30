@@ -30,14 +30,14 @@
 
 ## 2. Provider Choice — DigitalOcean
 
-**Decision:** DigitalOcean Basic Droplet, 1GB RAM / 1 vCPU / 25GB SSD, ~$6/month.
+**Decision:** DigitalOcean Basic Droplet, 1GB RAM / 1 vCPU / 25GB SSD, $6/month.
 
-| Provider | Cheapest Plan | Static IP | Pros | Cons |
+| Provider | 1GB Plan | Static IP | Pros | Cons |
 |---|---|---|---|---|
-| **DigitalOcean** | $4/mo basic droplet | Free (Reserved IP) | Simplest UI, predictable pricing, fast SSD, good docs | Smaller datacenter footprint than AWS |
-| AWS t4g.nano | ~$3.40/mo (1yr reserved) | Free (Elastic IP, while attached) | Largest ecosystem, AWS familiarity if needed later | More complex IAM/VPC setup, billing surprises |
-| Hetzner Cloud | €4.51/mo CX11 | Free | Cheapest in EU | Shorter track record outside Europe |
-| Linode (Akamai) | $5/mo Nanode | Free | Solid alternative | Acquired by Akamai, future direction unclear |
+| **DigitalOcean** | $6/mo basic droplet (1GB/1vCPU/25GB) | Free (Reserved IP) | Simplest UI, predictable pricing, fast SSD, good docs | Smaller datacenter footprint than AWS |
+| AWS t4g.small | ~$10/mo (1yr reserved) | Free (Elastic IP, while attached) | Largest ecosystem, AWS familiarity if needed later | More complex IAM/VPC setup, billing surprises |
+| Hetzner Cloud | €4.51/mo CX11 (2GB) | Free | Cheapest in EU | Shorter track record outside Europe |
+| Linode (Akamai) | $5/mo Nanode (1GB) | Free | Solid alternative | Acquired by Akamai, future direction unclear |
 
 **Why DigitalOcean specifically:**
 - Single-VM ops are exactly what they're optimized for.
@@ -48,7 +48,9 @@
 
 **Region:** `BLR1` (Bangalore) since the operator is in India and Binance has multiple low-latency endpoints. Asia-Pacific in general; secondary choice `SGP1` (Singapore) if BLR1 has any issues.
 
-**Total monthly cost estimate:** $4 droplet + $1.20 daily snapshots = **~$5.20/mo**. Well inside the "comically cheaper than EKS" budget.
+**Total monthly cost estimate:** $6 droplet + ~$0.30–0.50 daily snapshots ≈ **$6.50/mo** ≈ ₹540/mo. Well inside the "comically cheaper than EKS" budget.
+
+**Why 1GB and not the cheaper 512MB tier:** the bot's RSS during the 25.5h Phase 10C soak peaked at ~120MB, plus Ubuntu base + dashboard adds ~210MB. 512MB after OS overhead leaves no room for numpy spikes during S&D zone recomputation, SQLite buffer cache, or Phase 11D's balance-poller. OOM-killer terminates Python without a [CRASH] alert (the kernel doesn't go through the language runtime), so the failure mode is silent. The extra $2/mo is cheap insurance.
 
 ---
 
