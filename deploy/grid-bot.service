@@ -1,0 +1,61 @@
+[Unit]
+# Grid trading bot — Phase 11C systemd unit.
+#
+# Installed at /etc/systemd/system/grid-bot.service. The provisioning
+# script copies it from this repo into place. Edit `ExecStart` to flip
+# between testnet and mainnet (or use `systemctl edit grid-bot` to layer
+# an override without touching this file).
+Description=Grid trading bot (Phase 11C)
+Documentation=file:///home/bot/grid-bot/docs/design/phase_11c_cloud_migration.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+Group=bot
+WorkingDirectory=/home/bot/grid-bot
+EnvironmentFile=/home/bot/grid-bot/.env
+
+# Default to mainnet --live. For the first launch on a fresh VM the
+# operator should run `python -m src.grid.grid_runner --env testnet`
+# manually inside a tmux session, soak it for ~24h, THEN enable this
+# unit for mainnet (per docs/runbook/cloud_deploy.md step 7).
+ExecStart=/home/bot/grid-bot/.venv/bin/python -m src.grid.grid_runner --env mainnet --live
+
+# Auto-restart on crash. RestartSec spaces retries so a tight crashloop
+# can't pin the CPU; StartLimit caps the burst so a permanently-broken
+# config triggers `systemctl status grid-bot` showing failed state
+# rather than spinning forever.
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Capture process stdout/stderr in the systemd journal. The bot's own
+# structlog file handler writes to logs/grid_bot.log in parallel.
+StandardOutput=journal
+StandardError=journal
+
+# Resource limits. Phase 10C soak peaked at 120MB RSS; 400M leaves
+# ~3x headroom for numpy spikes + Phase 11D balance polling. If we
+# blow past 400M we want to know about it (OOM-killer surfaces in
+# journal as "killed by signal 9").
+MemoryMax=400M
+TasksMax=100
+
+# Security hardening — confine the bot to its own home subtree.
+# The bot only writes runtime/, logs/, data/. Everything else is
+# read-only or invisible.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/bot/grid-bot/runtime /home/bot/grid-bot/logs /home/bot/grid-bot/data
+
+[Install]
+WantedBy=multi-user.target

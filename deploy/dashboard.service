@@ -1,0 +1,51 @@
+[Unit]
+# Local dashboard — Phase 11C systemd unit.
+#
+# Installed at /etc/systemd/system/dashboard.service. Listens on
+# 127.0.0.1:8080 only — no public exposure. The operator reaches it
+# via SSH tunnel from their laptop:
+#   ssh -L 8080:127.0.0.1:8080 bot@<vm-ip>
+# then opens http://localhost:8080 in the browser.
+Description=Grid bot local dashboard (Phase 11C)
+Documentation=file:///home/bot/grid-bot/docs/design/phase_11c_cloud_migration.md
+After=network-online.target
+
+[Service]
+Type=simple
+User=bot
+Group=bot
+WorkingDirectory=/home/bot/grid-bot
+EnvironmentFile=/home/bot/grid-bot/.env
+ExecStart=/home/bot/grid-bot/.venv/bin/python -m src.dashboard.server
+
+# Auto-restart matches grid-bot.service. Dashboard is read-only on the
+# bot's state, so a crash here is harmless to trading — but we still
+# want it to come back automatically so SSH tunnels resume working.
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+
+# Tighter limits than grid-bot — the dashboard is a read-only HTTP
+# server with no numpy / pandas / market data path. 200M is generous.
+MemoryMax=200M
+TasksMax=50
+
+# Security hardening. Dashboard reads STATUS.json + the log file and
+# writes runtime/HALT (the kill-switch sentinel). Anything else is
+# read-only or invisible.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/bot/grid-bot/runtime
+
+[Install]
+WantedBy=multi-user.target
