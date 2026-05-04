@@ -82,10 +82,61 @@ logger = get_logger("grid_runner")
 SETTINGS_PATH = "config/settings.yaml"
 DB_PATH = "data/marketdata.db"
 
+# Default kill-switch sentinel path. Mirrors RiskConfig.kill_switch_path
+# default. The early-startup check (_abort_if_halt_sentinel_present) reads
+# this directly rather than going through RiskConfig because it must run
+# before any expensive setup. If you customise kill_switch_path in
+# settings.yaml, update this constant too.
+_HALT_SENTINEL_PATH = pathlib.Path("runtime/HALT")
+
+# Exit code used when we abort because the HALT sentinel is present at
+# startup. Listed in deploy/grid-bot.service's RestartPreventExitStatus so
+# systemd does NOT auto-restart in this specific case — preventing the
+# boot-halt-restart storm we hit on 2026-05-04.
+_EXIT_HALT_SENTINEL_PRESENT = 3
+
 
 def _load_settings() -> dict:
     with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def _abort_if_halt_sentinel_present(
+    path: pathlib.Path = _HALT_SENTINEL_PATH,
+) -> None:
+    """
+    If the HALT sentinel file exists at startup, exit immediately with code
+    `_EXIT_HALT_SENTINEL_PRESENT` so systemd does NOT auto-restart us.
+
+    WHY this exists: the runtime/HALT sentinel is intended as "trip the kill
+    switch on a RUNNING bot", not "prevent a stopped bot from starting". But
+    systemd's `Restart=always` doesn't make that distinction — it brings the
+    process back, the runner constructs the alerter, fires [BOOT], the risk
+    monitor sees the sentinel, fires [HALT], the runner exits with [STOP],
+    systemd restarts again, and so on. That's a 4-alert-per-cycle storm
+    (~50 alerts/min). Found in Phase 11D dev on 2026-05-04 after a single
+    /halt produced ~1.4k Telegram messages in an hour.
+
+    The fix is two-pronged:
+      * This function: bail out BEFORE any alerter / engine / task setup,
+        so the boot path is silent if the sentinel is present.
+      * deploy/grid-bot.service: `RestartPreventExitStatus=3` so systemd
+        respects this exit code and does NOT restart.
+
+    Either alone is insufficient. Both together break the storm cleanly.
+    """
+    if path.exists():
+        # Logger may not be set up yet at the very first call site, but
+        # this is called AFTER configure_logging(settings) so it's safe.
+        logger.error("HALT sentinel present at startup — refusing to start",
+                     path=str(path))
+        # Stderr too, for the operator running interactively.
+        print(
+            f"\nRefusing to start: {path} is present.\n"
+            f"Remove it and re-launch when ready: rm {path}\n",
+            file=sys.stderr,
+        )
+        sys.exit(_EXIT_HALT_SENTINEL_PRESENT)
 
 
 async def _run(dry_run: bool = False,
@@ -99,6 +150,12 @@ async def _run(dry_run: bool = False,
     # discovered this had been a no-op since Phase 1 — settings.logging.file
     # was being read by nothing.
     configure_logging(settings)
+
+    # Early HALT-sentinel check — done BEFORE any alerter / engine / task
+    # setup so a forgotten runtime/HALT does not trigger a systemd boot-halt-
+    # restart storm. See _abort_if_halt_sentinel_present docstring for the
+    # full incident postmortem.
+    _abort_if_halt_sentinel_present()
 
     # --- Env resolution (Phase 10) ---------------------------------------
     # Decide testnet vs mainnet BEFORE we print anything or load keys. The
