@@ -290,6 +290,28 @@ class BinanceExchange(ExchangeBase):
         logger.warning("asset not found in account", asset=asset)
         return 0.0
 
+    async def get_account_balances(self) -> dict[str, float]:
+        """
+        Get TOTAL (free + locked) balance for every non-zero asset.
+
+        Phase 11D dynamic sizing needs this — balances locked in open
+        orders are still operator equity, just not currently spendable.
+        Without including locked, equity would shrink each time the bot
+        placed a grid. See ExchangeBase.get_account_balances for context.
+
+        Filters to non-zero balances to keep the dict small (Binance
+        returns ~600 assets most of which are zero).
+        """
+        await self._check_rate_limit()
+        account = self._client.get_account()
+        out: dict[str, float] = {}
+        for balance in account["balances"]:
+            total = float(balance["free"]) + float(balance["locked"])
+            if total > 0:
+                out[balance["asset"]] = total
+        logger.debug("account balances fetched", asset_count=len(out))
+        return out
+
     async def get_ticker_price(self, symbol: str) -> float:
         """Get the current market price for a symbol."""
         await self._check_rate_limit()

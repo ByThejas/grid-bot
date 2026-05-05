@@ -174,6 +174,28 @@ class ExchangeBase(ABC):
         """Get available balance for an asset (e.g., 'BTC', 'USDT')."""
         ...
 
+    async def get_account_balances(self) -> dict[str, float]:
+        """
+        Get TOTAL balance (free + locked) for every asset in the account.
+
+        Phase 11D added this to support dynamic sizing — the balance poller
+        needs free+locked because locked balances are still the operator's
+        money, just sitting in open orders. Without locking included,
+        placing the grid would shrink "equity" each cycle.
+
+        Returns dict of asset → total amount, e.g.
+            {'USDT': 95.36, 'BTC': 0.0009, 'ETH': 0.013}
+
+        Default implementation raises NotImplementedError so adapters that
+        don't support balance queries (e.g. BacktestExchange) don't have
+        to opt in. Concrete adapters that DO support it (BinanceExchange,
+        DryRunExchange wrapping it) override.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement get_account_balances. "
+            f"Required for Phase 11D dynamic sizing."
+        )
+
     @abstractmethod
     async def get_ticker_price(self, symbol: str) -> float:
         """Get current price for a symbol."""
