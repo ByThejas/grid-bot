@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.notifications.alerter import Alerter, NullAlerter
+from src.risk.balance_poller import BalancePollerBase
 from src.risk.config import RiskConfig
 from src.utils.logger import get_logger
 
@@ -74,7 +75,12 @@ class RiskManager:
         risk.record_closed(order_id)
     """
 
-    def __init__(self, config: RiskConfig, alerter: Optional[Alerter] = None):
+    def __init__(
+        self,
+        config: RiskConfig,
+        alerter: Optional[Alerter] = None,
+        balance_poller: Optional[BalancePollerBase] = None,
+    ):
         self._cfg = config
         # Lock protects every mutable field. on_fill arrives on the WS
         # dispatch task; check_can_place runs on engine tasks. Multiple
@@ -97,6 +103,34 @@ class RiskManager:
         # alert. Default NullAlerter keeps existing tests / CLI rehearsals
         # working with no behaviour change.
         self._alerter: Alerter = alerter or NullAlerter()
+        # BalancePoller (Phase 11D). When wired, daily_loss_limit_usd
+        # comes from poller.daily_loss_limit_usd() instead of the static
+        # config value — the floor scales with current wallet equity.
+        # Optional so existing tests + dry-run rehearsals work unchanged.
+        self._balance_poller = balance_poller
+
+    # ------------------------------------------------------------------
+    # Daily loss floor — Phase 11D made this dynamic
+    # ------------------------------------------------------------------
+
+    @property
+    def daily_loss_limit_usd(self) -> float:
+        """
+        Current daily loss floor in USDT. Prefers the BalancePoller's
+        equity-derived value; falls back to the static config value if
+        no poller is wired OR if the poller hasn't computed equity yet
+        (which would return 0.0 — at startup before the first refresh,
+        or in NullBalancePoller mode where current_equity_usdt is None).
+
+        Property (not method) so existing read sites — which expected
+        `self._cfg.daily_loss_limit_usd` to be a plain float — work
+        with a one-character change (`._cfg.` → `.`).
+        """
+        if self._balance_poller is not None:
+            dynamic = self._balance_poller.daily_loss_limit_usd()
+            if dynamic > 0.0:
+                return dynamic
+        return self._cfg.daily_loss_limit_usd
 
     # ------------------------------------------------------------------
     # Halt state
@@ -118,10 +152,12 @@ class RiskManager:
             open_count = len(self._open_order_ids)
         logger.error("RISK HALT", reason=reason)
         # Fire-and-forget; the alerter.halt contract is sync + non-blocking.
+        # Reads the dynamic property (Phase 11D) which prefers the poller's
+        # equity-derived floor over the static config value.
         self._alerter.halt(
             reason=reason,
             realized_24h_usd=realized_24h,
-            daily_loss_limit_usd=self._cfg.daily_loss_limit_usd,
+            daily_loss_limit_usd=self.daily_loss_limit_usd,
             open_orders=open_count,
         )
 
@@ -175,11 +211,16 @@ class RiskManager:
                 )
             # Daily loss check uses the current ledger; trim outside the
             # placement path is fine since record_fill trims on write.
+            # Phase 11D: floor reads from the dynamic property which prefers
+            # the poller's equity-derived value. Property read is GIL-atomic
+            # (single attribute access on a sync object) so calling it under
+            # this lock is safe — no risk of deadlock.
             realized = self._realized_pnl_locked()
-            if realized <= -self._cfg.daily_loss_limit_usd:
+            floor = self.daily_loss_limit_usd
+            if realized <= -floor:
                 return (
                     f"daily loss floor breached "
-                    f"({realized:.2f} <= -{self._cfg.daily_loss_limit_usd:.2f})"
+                    f"({realized:.2f} <= -{floor:.2f})"
                 )
         return None
 

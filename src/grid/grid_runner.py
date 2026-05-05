@@ -367,7 +367,10 @@ async def _run(dry_run: bool = False,
         env_mode=env_mode,
         symbols=symbols,
         max_open_orders=risk_cfg.max_open_orders,
-        daily_loss_limit_usd=risk_cfg.daily_loss_limit_usd,
+        # Phase 11D: read the effective floor via the RiskManager property,
+        # which prefers the BalancePoller's equity-derived value if wired.
+        # Without a poller, this returns the static config value verbatim.
+        daily_loss_limit_usd=risk.daily_loss_limit_usd,
     )
 
     # --- Run stream + engines concurrently ---
