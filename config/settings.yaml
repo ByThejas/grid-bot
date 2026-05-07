@@ -169,6 +169,48 @@ observability:
   # the day just ended). Set to false only for noisy debugging.
   enable_daily_summary: true
 
+# --- Dynamic balance-adjusted sizing (Phase 11D) ---
+# Adapts order_size and daily_loss_limit_usd to current wallet equity.
+# Disabled by default — flip enabled to true after you've reviewed the
+# math against your wallet size. The factory always returns a working
+# poller (NullBalancePoller when disabled) so a missing or misconfigured
+# block never prevents the bot from booting.
+#
+# Equity formula: USDT + BTC×price + ETH×price (all converted to USDT).
+# Other altcoins are NOT counted (BNB held for fee discounts, etc.).
+#
+# See docs/design/phase_11d_dynamic_sizing.md for the full rationale,
+# failure modes, and worked examples.
+dynamic_sizing:
+  # Master switch. false → NullBalancePoller, returns the static order_size
+  # values from the grid: block above. No async polling, no equity tracking.
+  enabled: false
+  # How often to refresh equity from Binance. 30 min is a good balance —
+  # frequent enough to track wallet drift from accumulating fills, infrequent
+  # enough to not hammer the REST API.
+  poll_interval_minutes: 30
+  # % of equity each grid level should target. 0.5% × 4 levels per symbol ×
+  # 2 symbols = ~4% of equity locked in open orders at any time.
+  order_size_pct: 0.5
+  # Daily loss floor as % of equity. At $200 equity → $10/day floor;
+  # at $20k equity → $1000/day. Replaces the static daily_loss_limit_usd
+  # in the risk: block above when dynamic sizing is enabled.
+  daily_loss_pct: 5.0
+  # Cap on per-level size. If equity grows fast (deposit, fortunate fills)
+  # and you don't want risk to scale linearly past a point, this clamps
+  # the per-level percentage. null (or omit) for no cap.
+  max_order_size_pct: 2.0
+  # Flash-crash failsafe. If equity drops more than this % within the
+  # window below, the engine pauses NEW placements (existing orders keep
+  # their place on the book). Plugs the hole where a fast crash drops
+  # both equity AND the equity-derived daily floor in lockstep.
+  flash_crash_pause_pct: 20.0
+  flash_crash_window_minutes: 60
+  # Tolerate this many consecutive poll failures using last-known-good
+  # equity before alerting [PAUSE balance_poller]. Subsequent successful
+  # polls clear the alert.
+  failover_warn_after_consecutive_failures: 3
+
 # --- Dashboard (Phase 11B) ---
 # Tiny local HTML status page + halt button. Run as a SECOND process
 # alongside the bot:
