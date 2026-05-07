@@ -134,6 +134,11 @@ class DryRunExchange(ExchangeBase):
     async def get_balance(self, asset: str) -> float:
         return await self._inner.get_balance(asset)
 
+    async def get_account_balances(self) -> dict[str, float]:
+        # Read-only — even in dry-run we want real balances for Phase 11D
+        # dynamic sizing to compute against the operator's actual wallet.
+        return await self._inner.get_account_balances()
+
     async def get_ticker_price(self, symbol: str) -> float:
         return await self._inner.get_ticker_price(symbol)
 

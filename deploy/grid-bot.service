@@ -32,6 +32,16 @@ RestartSec=5
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
+# Exit code 3 means "HALT sentinel was present at startup, refused to
+# start". When the operator deliberately halts the bot via /halt or by
+# touching runtime/HALT, we don't want systemd to restart us in a tight
+# loop firing [BOOT]/[HALT]/[STOP] alerts every ~5 seconds. The runner
+# emits exit code 3 in that specific case (see _abort_if_halt_sentinel_present
+# in src/grid/grid_runner.py); systemd respects this directive and stays
+# stopped instead of restarting. Found and fixed during Phase 11D dev on
+# 2026-05-04 after a single /halt produced ~1.4k Telegram messages.
+RestartPreventExitStatus=3
+
 # Capture process stdout/stderr in the systemd journal. The bot's own
 # structlog file handler writes to logs/grid_bot.log in parallel.
 StandardOutput=journal

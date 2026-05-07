@@ -55,6 +55,7 @@ from src.grid.config import GridEngineConfig
 from src.grid.levels import GridParams, compute_grid
 from src.grid.state import GridState
 from src.notifications.alerter import Alerter, NullAlerter
+from src.risk.balance_poller import BalancePollerBase
 from src.risk.manager import RiskManager
 from src.signals.base import Signal
 from src.signals.liquidity import LiquiditySignal
@@ -88,6 +89,7 @@ class GridEngine:
         liquidity: Optional[LiquiditySignal] = None,
         sentiment: Optional[SentimentSignal] = None,
         alerter: Optional[Alerter] = None,
+        balance_poller: Optional[BalancePollerBase] = None,
     ):
         self._exchange = exchange
         self._config = config
@@ -109,6 +111,13 @@ class GridEngine:
         # Alerter is shared across engines (Phase 11A). NullAlerter is the
         # default so test fixtures and dry-run runs work unchanged.
         self._alerter: Alerter = alerter or NullAlerter()
+        # BalancePoller (Phase 11D). When wired, drives per-level order
+        # size as a percentage of wallet equity instead of using the static
+        # config value. Also exposes a flash-crash flag the engine consults
+        # before placing — same skip-and-retry pattern as liquidity/sentiment.
+        # Optional so existing tests + dry-run rehearsals work unchanged
+        # (in those paths order_size falls back to self._config.order_size).
+        self._balance_poller = balance_poller
         self._state = GridState()
         self._filters: Optional[SymbolFilter] = None
         # The spacing the active grid was placed with. Updated each time
@@ -116,6 +125,11 @@ class GridEngine:
         # original order was part of — not on a hypothetical re-derived
         # one that might differ after a liquidity widening.
         self._active_spacing_pct: float = config.base_spacing_pct
+        # The order_size that was active at the LAST grid placement.
+        # Used by fill replacements so the mirror order matches the size
+        # of the just-filled order, not whatever the poller might say
+        # several minutes later.
+        self._active_order_size: float = config.order_size
         # Counters for observability at shutdown.
         self._placed = 0
         self._filled = 0
@@ -123,6 +137,10 @@ class GridEngine:
         self._blocked_by_risk = 0
         self._paused_by_liquidity = 0
         self._paused_by_sentiment = 0
+        # Phase 11D: pause counter for the equity-flash-crash failsafe.
+        # Distinct from the other pause counters so the operator can tell
+        # which signal pulled the brakes.
+        self._paused_by_balance_crash = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -232,7 +250,24 @@ class GridEngine:
         await self._place_grid(current, zones)
 
     async def _place_grid(self, center: float, zones) -> None:
-        # Sentiment check first — local I/O only, no exchange call. If
+        # Phase 11D flash-crash failsafe — checked first because it's the
+        # cheapest (in-memory bool, no I/O) and the most "this is broken,
+        # don't place anything" of the pause signals. Same skip-and-retry
+        # pattern as liquidity/sentiment: drift monitor will re-attempt
+        # on its next iteration, by which time equity may have recovered.
+        if (
+            self._balance_poller is not None
+            and self._balance_poller.is_flash_crashed()
+        ):
+            self._paused_by_balance_crash += 1
+            logger.warning(
+                "grid placement paused by balance flash-crash",
+                symbol=self._config.symbol,
+                equity_usdt=self._balance_poller.current_equity_usdt(),
+            )
+            return
+
+        # Sentiment check next — local I/O only, no exchange call. If
         # sentiment is sharply negative we don't even need to ask the
         # exchange about the book. Drift monitor will retry on its next
         # iteration so the grid auto-resumes once sentiment recovers.
@@ -278,7 +313,23 @@ class GridEngine:
                 logger.warning("liquidity compute failed — using base spacing",
                                error=str(e))
 
+        # Phase 11D: resolve per-level order_size from the BalancePoller
+        # if wired. Without a poller (older tests, dry-run rehearsals)
+        # we keep the legacy static config value. The poller takes the
+        # mid (= center) plus filter info to do its USDT-notional → base
+        # conversion + min_notional floor. Stored in _active_order_size
+        # so fill replacements use the same size as the just-filled order.
+        order_size = self._config.order_size
+        if self._balance_poller is not None and self._filters is not None:
+            order_size = self._balance_poller.order_size_in_base(
+                symbol=self._config.symbol,
+                mid_price=center,
+                step_size=self._filters.step_size,
+                min_notional=self._filters.min_notional,
+            )
+
         self._active_spacing_pct = spacing_pct
+        self._active_order_size = order_size
         params = GridParams(
             symbol=self._config.symbol,
             center_price=center,
@@ -287,7 +338,7 @@ class GridEngine:
             max_spacing_pct=self._config.max_spacing_pct,
             levels_above=self._config.levels_above,
             levels_below=self._config.levels_below,
-            order_size=self._config.order_size,
+            order_size=order_size,
             zones=zones,
         )
         levels = compute_grid(params)
@@ -511,7 +562,8 @@ class GridEngine:
                         recentered_total=self._recentered,
                         blocked_by_risk=self._blocked_by_risk,
                         paused_by_liquidity=self._paused_by_liquidity,
-                        paused_by_sentiment=self._paused_by_sentiment)
+                        paused_by_sentiment=self._paused_by_sentiment,
+                        paused_by_balance_crash=self._paused_by_balance_crash)
         except Exception:
             logger.exception("SHUTDOWN cancel_all FAILED — check exchange for dangling orders",
                              symbol=self._config.symbol)

@@ -66,6 +66,7 @@ from src.grid.engine import GridEngine
 from src.market_data.storage import MarketDataStore
 from src.notifications.alerter import make_alerter
 from src.observability.heartbeat import HeartbeatMonitor, ObservabilityConfig
+from src.risk.balance_poller import make_balance_poller
 from src.risk.config import RiskConfig
 from src.risk.manager import RiskManager
 from src.signals.liquidity import LiquidityConfig, LiquiditySignal
@@ -82,10 +83,67 @@ logger = get_logger("grid_runner")
 SETTINGS_PATH = "config/settings.yaml"
 DB_PATH = "data/marketdata.db"
 
+# Default kill-switch sentinel path. Mirrors RiskConfig.kill_switch_path
+# default. The early-startup check (_abort_if_halt_sentinel_present) reads
+# this directly rather than going through RiskConfig because it must run
+# before any expensive setup. If you customise kill_switch_path in
+# settings.yaml, update this constant too.
+_HALT_SENTINEL_PATH = pathlib.Path("runtime/HALT")
+
+# Exit code used when we abort because the HALT sentinel is present at
+# startup. Listed in deploy/grid-bot.service's RestartPreventExitStatus so
+# systemd does NOT auto-restart in this specific case — preventing the
+# boot-halt-restart storm we hit on 2026-05-04.
+_EXIT_HALT_SENTINEL_PRESENT = 3
+
+# Exit code used when the BalancePoller fails its first refresh at startup
+# (Phase 11D fail-CLOSED behaviour). systemd SHOULD restart on this — it's
+# typically a transient network blip — so we deliberately don't add it to
+# RestartPreventExitStatus.
+_EXIT_BALANCE_POLLER_FAILED = 4
+
 
 def _load_settings() -> dict:
     with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def _abort_if_halt_sentinel_present(
+    path: pathlib.Path = _HALT_SENTINEL_PATH,
+) -> None:
+    """
+    If the HALT sentinel file exists at startup, exit immediately with code
+    `_EXIT_HALT_SENTINEL_PRESENT` so systemd does NOT auto-restart us.
+
+    WHY this exists: the runtime/HALT sentinel is intended as "trip the kill
+    switch on a RUNNING bot", not "prevent a stopped bot from starting". But
+    systemd's `Restart=always` doesn't make that distinction — it brings the
+    process back, the runner constructs the alerter, fires [BOOT], the risk
+    monitor sees the sentinel, fires [HALT], the runner exits with [STOP],
+    systemd restarts again, and so on. That's a 4-alert-per-cycle storm
+    (~50 alerts/min). Found in Phase 11D dev on 2026-05-04 after a single
+    /halt produced ~1.4k Telegram messages in an hour.
+
+    The fix is two-pronged:
+      * This function: bail out BEFORE any alerter / engine / task setup,
+        so the boot path is silent if the sentinel is present.
+      * deploy/grid-bot.service: `RestartPreventExitStatus=3` so systemd
+        respects this exit code and does NOT restart.
+
+    Either alone is insufficient. Both together break the storm cleanly.
+    """
+    if path.exists():
+        # Logger may not be set up yet at the very first call site, but
+        # this is called AFTER configure_logging(settings) so it's safe.
+        logger.error("HALT sentinel present at startup — refusing to start",
+                     path=str(path))
+        # Stderr too, for the operator running interactively.
+        print(
+            f"\nRefusing to start: {path} is present.\n"
+            f"Remove it and re-launch when ready: rm {path}\n",
+            file=sys.stderr,
+        )
+        sys.exit(_EXIT_HALT_SENTINEL_PRESENT)
 
 
 async def _run(dry_run: bool = False,
@@ -99,6 +157,12 @@ async def _run(dry_run: bool = False,
     # discovered this had been a no-op since Phase 1 — settings.logging.file
     # was being read by nothing.
     configure_logging(settings)
+
+    # Early HALT-sentinel check — done BEFORE any alerter / engine / task
+    # setup so a forgotten runtime/HALT does not trigger a systemd boot-halt-
+    # restart storm. See _abort_if_halt_sentinel_present docstring for the
+    # full incident postmortem.
+    _abort_if_halt_sentinel_present()
 
     # --- Env resolution (Phase 10) ---------------------------------------
     # Decide testnet vs mainnet BEFORE we print anything or load keys. The
@@ -159,14 +223,67 @@ async def _run(dry_run: bool = False,
         logger.info("no market data DB found — grid will be unbiased",
                     expected_db=DB_PATH)
 
-    # --- Shared risk manager (one per process, all engines consult it) ---
-    # env_mode drives the mainnet-overrides merge inside from_yaml.
+    # --- Engine configs built first ---
+    # Phase 11D needs the per-symbol static order_size BEFORE constructing
+    # the BalancePoller (factory needs them as the NullBalancePoller
+    # fallback). So we resolve all engine configs up-front, then the
+    # poller, then RiskManager + engines.
+    engine_configs: dict[str, GridEngineConfig] = {
+        symbol: GridEngineConfig.from_yaml(symbol, settings)
+        for symbol in symbols
+    }
+    static_order_sizes: dict[str, float] = {
+        symbol: cfg.order_size for symbol, cfg in engine_configs.items()
+    }
+
+    # --- RiskConfig (resolves mainnet overrides) ---
     risk_cfg = RiskConfig.from_yaml(settings, env_mode=env_mode)
-    risk = RiskManager(risk_cfg, alerter=alerter)
+
+    # --- BalancePoller (Phase 11D) ---
+    # Built BEFORE RiskManager + engines because both want to reference it.
+    # The factory returns NullBalancePoller (no-op) when dynamic_sizing
+    # is disabled or the block is absent; it returns the live BalancePoller
+    # when enabled. start() does the first equity refresh inline — for the
+    # live impl that's a real REST call to Binance.
+    balance_poller = make_balance_poller(
+        settings=settings,
+        exchange=exchange,
+        alerter=alerter,
+        static_order_sizes_in_base=static_order_sizes,
+        static_daily_loss_limit_usd=risk_cfg.daily_loss_limit_usd,
+    )
+    try:
+        await balance_poller.start()
+    except Exception as e:
+        # Fail-CLOSED. Without equity we cannot compute sizes; better to
+        # exit and let systemd retry than to guess. systemd's Restart=always
+        # will bring us back; this exit code is NOT in RestartPreventExitStatus.
+        logger.error("balance poller startup failed — refusing to start",
+                     error=str(e), error_type=type(e).__name__)
+        print(
+            f"\nBALANCE POLLER STARTUP FAILED:\n{e}\n\n"
+            f"This usually means the bot couldn't reach Binance to fetch\n"
+            f"wallet balances. Check the IP whitelist and try again.\n",
+            file=sys.stderr,
+        )
+        # Best-effort cleanup of the alerter we already started.
+        try:
+            await alerter.stop()
+        except Exception:
+            pass
+        sys.exit(_EXIT_BALANCE_POLLER_FAILED)
+    logger.info("balance poller wired",
+                type=type(balance_poller).__name__,
+                initial_equity=balance_poller.current_equity_usdt())
+
+    # --- Shared risk manager (one per process, all engines consult it) ---
+    risk = RiskManager(risk_cfg, alerter=alerter, balance_poller=balance_poller)
     logger.info("risk manager wired",
                 env_mode=env_mode,
                 max_open_orders=risk_cfg.max_open_orders,
-                daily_loss_limit_usd=risk_cfg.daily_loss_limit_usd,
+                # Effective floor — reads via the property, so this reflects
+                # the dynamic value if the poller is wired.
+                daily_loss_limit_usd=risk.daily_loss_limit_usd,
                 kill_switch_path=risk_cfg.kill_switch_path)
 
     # --- Shared liquidity signal (one per process, all engines consult it) ---
@@ -197,13 +314,14 @@ async def _run(dry_run: bool = False,
                 max_age_seconds=sent_cfg.max_age_seconds)
 
     # --- One engine per symbol ---
+    # Configs were built earlier (before BalancePoller construction);
+    # we just instantiate engines from them here, passing the poller too.
     engines: dict[str, GridEngine] = {}
-    for symbol in symbols:
-        cfg = GridEngineConfig.from_yaml(symbol, settings)
+    for symbol, cfg in engine_configs.items():
         engines[symbol] = GridEngine(
             exchange=exchange, config=cfg, signal=signal,
             risk=risk, liquidity=liquidity, sentiment=sentiment,
-            alerter=alerter,
+            alerter=alerter, balance_poller=balance_poller,
         )
 
     # --- User data stream dispatcher: fan events out to all engines ---
@@ -310,7 +428,10 @@ async def _run(dry_run: bool = False,
         env_mode=env_mode,
         symbols=symbols,
         max_open_orders=risk_cfg.max_open_orders,
-        daily_loss_limit_usd=risk_cfg.daily_loss_limit_usd,
+        # Phase 11D: read the effective floor via the RiskManager property,
+        # which prefers the BalancePoller's equity-derived value if wired.
+        # Without a poller, this returns the static config value verbatim.
+        daily_loss_limit_usd=risk.daily_loss_limit_usd,
     )
 
     # --- Run stream + engines concurrently ---
@@ -361,6 +482,16 @@ async def _run(dry_run: bool = False,
             pass
         try:
             await alerter.stop()
+        except Exception:
+            pass
+
+        # Phase 11D: stop the BalancePoller's polling task. Idempotent.
+        # NullBalancePoller's stop() is a no-op so this is safe even
+        # when dynamic sizing was disabled. Done AFTER alerter.stop()
+        # because the poller's failover-recovery path may emit a final
+        # [RESUME] alert which we want to ride out the alerter queue.
+        try:
+            await balance_poller.stop()
         except Exception:
             pass
 

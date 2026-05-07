@@ -148,7 +148,10 @@ def build_snapshot(
             "halt_reason": risk.halt_reason or None,
             "open_order_count": int(risk.open_order_count),
             "realized_pnl_24h": round(float(risk.realized_pnl_24h), 6),
-            "daily_loss_limit_usd": float(risk._cfg.daily_loss_limit_usd),
+            # Phase 11D: read via the dynamic property so STATUS.json
+            # reflects the EFFECTIVE floor — equity-derived from the
+            # poller when wired, static config otherwise.
+            "daily_loss_limit_usd": float(risk.daily_loss_limit_usd),
         }
     return {
         "env_mode": env_mode,

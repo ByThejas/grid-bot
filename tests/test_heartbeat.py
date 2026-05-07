@@ -66,6 +66,13 @@ class _FakeRisk:
     realized_pnl_24h: float = 0.0
     _cfg: _FakeRiskCfg = field(default_factory=_FakeRiskCfg)
 
+    @property
+    def daily_loss_limit_usd(self) -> float:
+        # Mirrors the real RiskManager.daily_loss_limit_usd property added
+        # in Phase 11D — returns the static config value here since the
+        # fake doesn't have a balance_poller wired.
+        return self._cfg.daily_loss_limit_usd
+
 
 def _tmpdir() -> str:
     return tempfile.mkdtemp(prefix="heartbeat-test-")
